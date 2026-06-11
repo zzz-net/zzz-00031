@@ -132,15 +132,6 @@ class TemperatureReading(BaseModel):
         from_attributes = True
 
 
-class ReadingImportResult(BaseModel):
-    total: int
-    successful: int
-    failed: int
-    errors: List[str] = []
-    new_alarms: int = 0
-    updated_alarms: int = 0
-
-
 class AlarmConfirmationBase(BaseModel):
     person_id: int
     note: Optional[str] = None
@@ -158,6 +149,8 @@ class AlarmDetail(BaseModel):
     zone_name: str
     alarm_type: AlarmTypeEnum
     status: AlarmStatusEnum
+    suppression_rule_id: Optional[int] = None
+    suppression_rule_reason: Optional[str] = None
     trigger_value: Optional[float] = None
     trigger_time: datetime
     latest_value: Optional[float] = None
@@ -200,6 +193,76 @@ class AlarmSuppressUpdate(BaseModel):
     person_id: int
     note: Optional[str] = None
     suppress_minutes: int = 60
+
+
+class SuppressionRuleStatus(str, Enum):
+    ACTIVE = "active"
+    REVOKED = "revoked"
+    EXPIRED = "expired"
+
+
+class SuppressionRuleCreate(BaseModel):
+    sensor_id: Optional[int] = None
+    zone_id: Optional[int] = None
+    alarm_type: Optional[AlarmTypeEnum] = None
+    start_time: datetime
+    end_time: datetime
+    reason: str
+    created_by: int
+
+
+class SuppressionRuleBase(BaseModel):
+    id: int
+    sensor_id: Optional[int] = None
+    zone_id: Optional[int] = None
+    alarm_type: Optional[AlarmTypeEnum] = None
+    start_time: datetime
+    end_time: datetime
+    reason: str
+    status: SuppressionRuleStatus
+    created_by: int
+    created_at: datetime
+    updated_at: datetime
+
+    class Config:
+        from_attributes = True
+
+
+class SuppressionRuleDetail(SuppressionRuleBase):
+    sensor_code: Optional[str] = None
+    sensor_name: Optional[str] = None
+    zone_name: Optional[str] = None
+    creator_name: Optional[str] = None
+    creator_role: Optional[RoleEnum] = None
+    revoked_by: Optional[int] = None
+    revoked_at: Optional[datetime] = None
+    revoker_name: Optional[str] = None
+    hit_count: int = 0
+
+
+class SuppressionHit(BaseModel):
+    id: int
+    rule_id: int
+    alarm_id: int
+    sensor_id: int
+    sensor_code: Optional[str] = None
+    alarm_type: AlarmTypeEnum
+    trigger_value: Optional[float] = None
+    trigger_time: datetime
+    created_at: datetime
+
+    class Config:
+        from_attributes = True
+
+
+class ReadingImportResult(BaseModel):
+    total: int
+    successful: int
+    failed: int
+    errors: List[str] = []
+    new_alarms: int = 0
+    updated_alarms: int = 0
+    suppressed_alarms: int = 0
 
 
 AlarmDetail.model_rebuild()

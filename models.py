@@ -103,6 +103,7 @@ class Alarm(Base):
     alarm_type = Column(Enum(AlarmTypeEnum), nullable=False)
     status = Column(Enum(AlarmStatusEnum), nullable=False, default=AlarmStatusEnum.OPEN)
     threshold_version_id = Column(Integer, ForeignKey("threshold_versions.id"), nullable=True)
+    suppression_rule_id = Column(Integer, ForeignKey("suppression_rules.id"), nullable=True)
     trigger_value = Column(Float, nullable=True)
     trigger_time = Column(DateTime(timezone=True), nullable=False)
     latest_value = Column(Float, nullable=True)
@@ -113,6 +114,7 @@ class Alarm(Base):
 
     sensor = relationship("Sensor", back_populates="alarms")
     confirmations = relationship("AlarmConfirmation", back_populates="alarm", order_by="AlarmConfirmation.created_at")
+    suppression_rule = relationship("SuppressionRule", foreign_keys=[suppression_rule_id])
 
 
 class AlarmConfirmation(Base):
@@ -128,3 +130,50 @@ class AlarmConfirmation(Base):
 
     alarm = relationship("Alarm", back_populates="confirmations")
     confirmer = relationship("Person", back_populates="confirmations")
+
+
+class SuppressionRuleStatus(str, enum.Enum):
+    ACTIVE = "active"
+    REVOKED = "revoked"
+    EXPIRED = "expired"
+
+
+class SuppressionRule(Base):
+    __tablename__ = "suppression_rules"
+
+    id = Column(Integer, primary_key=True, index=True)
+    sensor_id = Column(Integer, ForeignKey("sensors.id"), nullable=True)
+    zone_id = Column(Integer, ForeignKey("zones.id"), nullable=True)
+    alarm_type = Column(Enum(AlarmTypeEnum), nullable=True)
+    start_time = Column(DateTime(timezone=True), nullable=False)
+    end_time = Column(DateTime(timezone=True), nullable=False)
+    reason = Column(String(255), nullable=False)
+    created_by = Column(Integer, ForeignKey("persons.id"), nullable=False)
+    status = Column(Enum(SuppressionRuleStatus), nullable=False, default=SuppressionRuleStatus.ACTIVE)
+    revoked_by = Column(Integer, ForeignKey("persons.id"), nullable=True)
+    revoked_at = Column(DateTime(timezone=True), nullable=True)
+    created_at = Column(DateTime(timezone=True), server_default=func.now())
+    updated_at = Column(DateTime(timezone=True), server_default=func.now(), onupdate=func.now())
+
+    sensor = relationship("Sensor", foreign_keys=[sensor_id])
+    zone = relationship("Zone", foreign_keys=[zone_id])
+    creator = relationship("Person", foreign_keys=[created_by])
+    revoker = relationship("Person", foreign_keys=[revoked_by])
+    hits = relationship("SuppressionHit", back_populates="rule")
+
+
+class SuppressionHit(Base):
+    __tablename__ = "suppression_hits"
+
+    id = Column(Integer, primary_key=True, index=True)
+    rule_id = Column(Integer, ForeignKey("suppression_rules.id"), nullable=False)
+    alarm_id = Column(Integer, ForeignKey("alarms.id"), nullable=False)
+    sensor_id = Column(Integer, ForeignKey("sensors.id"), nullable=False)
+    alarm_type = Column(Enum(AlarmTypeEnum), nullable=False)
+    trigger_value = Column(Float, nullable=True)
+    trigger_time = Column(DateTime(timezone=True), nullable=False)
+    created_at = Column(DateTime(timezone=True), server_default=func.now())
+
+    rule = relationship("SuppressionRule", back_populates="hits")
+    alarm = relationship("Alarm")
+    sensor = relationship("Sensor")

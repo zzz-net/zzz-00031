@@ -38,9 +38,9 @@ uvicorn main:app --reload --host 0.0.0.0 --port 8000
 
 | 角色 | 权限 |
 |------|------|
-| `admin` | 所有操作，包括关闭报警 |
-| `operator` | 确认、处理中、升级、关闭报警 |
-| `observer` | 仅查看，不能操作报警 |
+| `admin` | 所有操作，包括关闭报警、管理抑制规则 |
+| `operator` | 确认、处理中、升级、关闭报警、管理抑制规则 |
+| `observer` | 仅查看，不能操作报警、不能创建/撤销抑制规则 |
 
 ### 报警状态
 
@@ -57,16 +57,17 @@ uvicorn main:app --reload --host 0.0.0.0 --port 8000
 
 | 类型 | 说明 |
 |------|------|
-| `over_temp` | 超高温报警 |
-| `under_temp` | 超低温报警 |
-| `offline` | 离线报警 |
+| `over_temp` | 超高温报警（温度 > 上限） |
+| `under_temp` | 超低温报警（温度 < 下限） |
+| `offline` | 离线报警（两次读数间隔超过传感器 `offline_timeout_minutes`） |
 
 ### 关键规则
 
-1. **乱序保护**: 同一传感器乱序读数不会改写活跃报警
+1. **乱序保护**: 同一传感器的乱序读数（reading_time 早于已入库读数的最新时间）在写入前被拒绝，不入库，计入 failed 和 errors 列表
 2. **去重窗口**: 在去重窗口内，连续高温/低温只更新同一个报警
-3. **权限控制**: 观察者(observer)不能关闭或确认报警
-4. **关闭说明**: 关闭报警必须提供处理说明
+3. **权限控制**: 观察者(observer)不能确认、关闭或升级报警
+4. **关闭说明**: 关闭报警必须提供处理说明，缺少时返回 HTTP 400
+5. **离线检测**: 当一条读数的 reading_time 距该传感器上一条读数超过 `offline_timeout_minutes`（默认30分钟）时，自动产生一条 `offline` 类型报警，触发时间为上次读数时间 + 超时阈值
 
 ## API 示例 (curl)
 
@@ -270,23 +271,23 @@ curl -X POST http://localhost:8000/alarms/1/close \
 
 预期结果: 返回 400 错误，提示 "Resolution note is required to close an alarm"
 
-#### 3. 乱序读数不产生新报警
+#### 3. 乱序读数被拒绝（不入库）
 
-先导入一组读数产生报警:
+先导入一组正常读数:
 ```bash
 curl -X POST http://localhost:8000/readings/import \
   -H "Content-Type: application/json" \
-  -d '[{"sensor_code": "TEMP-001", "temperature": -10.0, "reading_time": "2026-06-12T10:00:00"}]'
+  -d '[{"sensor_code": "TEMP-001", "temperature": -18.0, "reading_time": "2026-06-12T10:00:00"}]'
 ```
 
 再导入更早时间的乱序读数:
 ```bash
 curl -X POST http://localhost:8000/readings/import \
   -H "Content-Type: application/json" \
-  -d '[{"sensor_code": "TEMP-001", "temperature": -9.0, "reading_time": "2026-06-12T09:30:00"}]'
+  -d '[{"sensor_code": "TEMP-001", "temperature": -19.0, "reading_time": "2026-06-12T09:30:00"}]'
 ```
 
-预期结果: 乱序读数不会产生新报警，也不会改变现有报警的触发时间
+预期结果: 返回 successful=0, failed=1, errors 列表包含 "out-of-order rejected"。乱序读数不会被写入数据库，也不会影响报警状态。批量导入时, rejected/failed 的计数与 errors 列表长度完全一致。
 
 #### 4. 去重窗口内连续高温只更新一个报警
 
@@ -333,9 +334,63 @@ curl -X GET "http://localhost:8000/readings/export.csv" -o readings.csv
 
 ---
 
+### 七、离线报警触发示例
+
+传感器配置了 `offline_timeout_minutes`（默认 30 分钟）后，若一条读数距上次读数超时，将自动生成 `offline` 报警。
+
+```bash
+# 第一次导入：建立基准读数
+curl -X POST http://localhost:8000/readings/import \
+  -H "Content-Type: application/json" \
+  -d '[{"sensor_code": "TEMP-002", "temperature": -22.0, "reading_time": "2026-06-12T08:00:00"}]'
+
+# 2 小时后再导入一条正常温度读数（间隔已远超 30 分钟阈值）
+curl -X POST http://localhost:8000/readings/import \
+  -H "Content-Type: application/json" \
+  -d '[{"sensor_code": "TEMP-002", "temperature": -22.5, "reading_time": "2026-06-12T10:00:00"}]'
+```
+
+预期结果：第二次导入应产生 1 个新报警（类型 `offline`，触发时间 = 上次读数时间 08:00 + 30min = 08:30），尽管读数值本身在正常范围内。
+
+---
+
+## 自动化测试
+
+项目包含 2 个 Python 测试脚本，用于回归验证所有用户可见行为。
+
+### 1. 复现与回归测试（修复项验证）
+
+```bash
+python test_alarm_fixes.py
+```
+
+覆盖内容:
+- **TEST 1**: 离线报警链路 — 导入超时后的正常读数应产生 `offline` 报警
+- **TEST 2**: 乱序读数拒绝 — 写入前校验, `successful`/`failed`/`errors` 对得上, 乱序数据不入库
+- **TEST 3**: 关闭报警缺 `resolution_note` 返回 **400**（与 README 一致，非 422）；观察者无权限操作
+- **TEST 4**: 完整报警生命周期（确认→处理→升级→关闭）+ 去重窗口 + 处理说明/确认记录留存
+- **TEST 5**: 报警 CSV/JSON 导出，ID 集合与 API 查询完全一致
+
+### 2. 重启后一致性验证
+
+```bash
+# 先跑一轮 test_alarm_fixes.py，然后重启 uvicorn
+python test_restart_consistency.py
+```
+
+验证内容:
+- 重启后所有报警（offline/over_temp）数量、类型、状态一致
+- 已关闭报警的 `resolution_note` 和 `confirmations` 记录完整
+- 离线报警 `trigger_value` 为 `None`
+- 报警 CSV/JSON 导出行数、ID 集合与 API 查询一致
+- 温度读数 CSV/API 条数一致
+- 配置数据（人员/传感器/库区/阈值版本）完整保留
+
+---
+
 ## 数据存储
 
-所有数据存储在 SQLite 数据库文件 `cold_storage.db` 中，包含以下表:
+所有数据存储在 SQLite 数据库文件 `cold_storage.db` 中，包含以下表：
 
 | 表名 | 说明 |
 |------|------|
@@ -353,15 +408,17 @@ curl -X GET "http://localhost:8000/readings/export.csv" -o readings.csv
 
 ```
 .
-├── main.py              # 主应用入口，API 路由
-├── models.py            # SQLAlchemy 数据模型
-├── schemas.py           # Pydantic 请求/响应模式
-├── crud.py              # 基础 CRUD 操作
-├── alarm_service.py     # 报警核心业务逻辑
-├── database.py          # 数据库连接配置
-├── init_data.py         # 样例数据初始化脚本
-├── requirements.txt     # Python 依赖
-├── examples/            # 样例数据
+├── main.py                    # 主应用入口，API 路由
+├── models.py                  # SQLAlchemy 数据模型
+├── schemas.py                 # Pydantic 请求/响应模式
+├── crud.py                    # 基础 CRUD 操作
+├── alarm_service.py           # 报警核心业务逻辑
+├── database.py                # 数据库连接配置
+├── init_data.py               # 样例数据初始化脚本
+├── test_alarm_fixes.py        # 复现与回归测试脚本
+├── test_restart_consistency.py# 重启后一致性测试
+├── requirements.txt           # Python 依赖
+├── examples/                  # 样例数据
 │   ├── readings_sample.json
 │   └── readings_sample.csv
 └── README.md

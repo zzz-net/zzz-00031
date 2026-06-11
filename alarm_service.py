@@ -5,9 +5,10 @@ from typing import List, Optional, Tuple
 
 from models import (
     Sensor, ThresholdVersion, TemperatureReading, Alarm, AlarmConfirmation,
-    AlarmStatusEnum, AlarmTypeEnum, Person, RoleEnum, Zone
+    AlarmStatusEnum, AlarmTypeEnum, Person, RoleEnum, Zone, SuppressionRule
 )
 from schemas import TemperatureReadingCreate, ReadingImportResult
+import crud
 
 
 def get_active_threshold(db: Session, sensor_id: int, at_time: datetime) -> Optional[ThresholdVersion]:
@@ -87,13 +88,16 @@ def create_alarm(
     alarm_type: AlarmTypeEnum,
     threshold: Optional[ThresholdVersion],
     trigger_value: Optional[float],
-    trigger_time: datetime
+    trigger_time: datetime,
+    suppression_rule: Optional[SuppressionRule] = None
 ) -> Alarm:
+    status = AlarmStatusEnum.SUPPRESSED if suppression_rule else AlarmStatusEnum.OPEN
     alarm = Alarm(
         sensor_id=sensor.id,
         alarm_type=alarm_type,
-        status=AlarmStatusEnum.OPEN,
+        status=status,
         threshold_version_id=threshold.id if threshold else None,
+        suppression_rule_id=suppression_rule.id if suppression_rule else None,
         trigger_value=trigger_value,
         trigger_time=trigger_time,
         latest_value=trigger_value,
@@ -101,6 +105,18 @@ def create_alarm(
     )
     db.add(alarm)
     db.flush()
+
+    if suppression_rule:
+        crud.create_suppression_hit(
+            db,
+            rule_id=suppression_rule.id,
+            alarm_id=alarm.id,
+            sensor_id=sensor.id,
+            alarm_type=alarm_type,
+            trigger_value=trigger_value,
+            trigger_time=trigger_time
+        )
+
     return alarm
 
 
@@ -141,25 +157,26 @@ def check_alarm_condition(
 
 
 def process_reading(db: Session, reading: TemperatureReadingCreate) -> Tuple[
-    Optional[Alarm], Optional[str], bool, List[Alarm], List[Alarm]
+    Optional[Alarm], Optional[str], bool, List[Alarm], List[Alarm], int
 ]:
     """
-    返回: (主报警对象, 错误信息, 主报警是否新报警, 新产生的辅助报警列表, 更新的辅助报警列表)
+    返回: (主报警对象, 错误信息, 主报警是否新报警, 新产生的辅助报警列表, 更新的辅助报警列表, 被抑制的新报警数)
     """
     sensor = db.query(Sensor).filter(Sensor.code == reading.sensor_code).first()
     if not sensor:
-        return None, f"Sensor {reading.sensor_code} not found", False, [], []
+        return None, f"Sensor {reading.sensor_code} not found", False, [], [], 0
 
     if not sensor.is_active:
-        return None, f"Sensor {reading.sensor_code} is inactive", False, [], []
+        return None, f"Sensor {reading.sensor_code} is inactive", False, [], [], 0
 
     threshold = get_active_threshold(db, sensor.id, reading.reading_time)
     if not threshold:
-        return None, f"No active threshold for sensor {reading.sensor_code} at {reading.reading_time}", False, [], []
+        return None, f"No active threshold for sensor {reading.sensor_code} at {reading.reading_time}", False, [], [], 0
 
     last_reading = get_last_reading(db, sensor.id)
     new_secondary_alarms = []
     updated_secondary_alarms = []
+    suppressed_count = 0
 
     if last_reading:
         earliest_time = get_sensor_earliest_reading_time(db, sensor.id)
@@ -167,33 +184,57 @@ def process_reading(db: Session, reading: TemperatureReadingCreate) -> Tuple[
             return None, (
                 f"Reading time {reading.reading_time} is earlier than existing earliest reading "
                 f"{earliest_time} for sensor {reading.sensor_code}, out-of-order rejected"
-            ), False, [], []
+            ), False, [], [], 0
         if reading.reading_time < last_reading.reading_time:
             return None, (
                 f"Reading time {reading.reading_time} is earlier than last reading "
                 f"{last_reading.reading_time} for sensor {reading.sensor_code}, out-of-order rejected"
-            ), False, [], []
+            ), False, [], [], 0
 
         gap_minutes = (reading.reading_time - last_reading.reading_time).total_seconds() / 60.0
         offline_timeout = sensor.offline_timeout_minutes or 30
         if gap_minutes > offline_timeout:
             offline_trigger_time = last_reading.reading_time + timedelta(minutes=offline_timeout)
             active_offline = get_active_alarm(db, sensor.id, AlarmTypeEnum.OFFLINE)
+            offline_suppression = crud.get_active_suppression_for_sensor(
+                db, sensor.id, AlarmTypeEnum.OFFLINE, offline_trigger_time
+            )
 
-            if not active_offline:
-                offline_alarm = create_alarm(
-                    db, sensor, AlarmTypeEnum.OFFLINE, threshold=None,
-                    trigger_value=None, trigger_time=offline_trigger_time
-                )
-                offline_alarm.latest_time = reading.reading_time
-                db.flush()
-                new_secondary_alarms.append(offline_alarm)
-            else:
+            if active_offline:
                 if reading.reading_time > (active_offline.latest_time or active_offline.trigger_time):
                     update_alarm_latest(db, active_offline, None, reading.reading_time)
                     updated_secondary_alarms.append(active_offline)
                 else:
                     updated_secondary_alarms.append(active_offline)
+            else:
+                recent_offline = (
+                    db.query(Alarm)
+                    .filter(
+                        Alarm.sensor_id == sensor.id,
+                        Alarm.alarm_type == AlarmTypeEnum.OFFLINE,
+                        Alarm.status == AlarmStatusEnum.SUPPRESSED,
+                        Alarm.trigger_time <= offline_trigger_time
+                    )
+                    .order_by(desc(Alarm.trigger_time))
+                    .first()
+                )
+                if recent_offline and offline_suppression:
+                    if reading.reading_time > (recent_offline.latest_time or recent_offline.trigger_time):
+                        update_alarm_latest(db, recent_offline, None, reading.reading_time)
+                        updated_secondary_alarms.append(recent_offline)
+                    else:
+                        updated_secondary_alarms.append(recent_offline)
+                else:
+                    offline_alarm = create_alarm(
+                        db, sensor, AlarmTypeEnum.OFFLINE, threshold=None,
+                        trigger_value=None, trigger_time=offline_trigger_time,
+                        suppression_rule=offline_suppression
+                    )
+                    offline_alarm.latest_time = reading.reading_time
+                    db.flush()
+                    new_secondary_alarms.append(offline_alarm)
+                    if offline_suppression:
+                        suppressed_count += 1
 
     db_reading = TemperatureReading(
         sensor_id=sensor.id,
@@ -209,6 +250,9 @@ def process_reading(db: Session, reading: TemperatureReadingCreate) -> Tuple[
 
     if alarm_type:
         active_alarm = get_active_alarm(db, sensor.id, alarm_type)
+        suppression_rule = crud.get_active_suppression_for_sensor(
+            db, sensor.id, alarm_type, reading.reading_time
+        )
 
         if active_alarm:
             if reading.reading_time > (active_alarm.latest_time or active_alarm.trigger_time):
@@ -219,17 +263,36 @@ def process_reading(db: Session, reading: TemperatureReadingCreate) -> Tuple[
                 db, sensor.id, alarm_type, threshold, reading.reading_time
             )
             if recent_alarm:
-                if reading.reading_time > (recent_alarm.latest_time or recent_alarm.trigger_time):
-                    update_alarm_latest(db, recent_alarm, reading.temperature, reading.reading_time)
-                    alarm = recent_alarm
+                is_suppressed_recent = recent_alarm.status == AlarmStatusEnum.SUPPRESSED
+                still_suppressed = suppression_rule is not None
+                if is_suppressed_recent and still_suppressed:
+                    if reading.reading_time > (recent_alarm.latest_time or recent_alarm.trigger_time):
+                        update_alarm_latest(db, recent_alarm, reading.temperature, reading.reading_time)
+                        alarm = recent_alarm
+                elif not is_suppressed_recent:
+                    if reading.reading_time > (recent_alarm.latest_time or recent_alarm.trigger_time):
+                        update_alarm_latest(db, recent_alarm, reading.temperature, reading.reading_time)
+                        alarm = recent_alarm
+                else:
+                    alarm = create_alarm(
+                        db, sensor, alarm_type, threshold,
+                        reading.temperature, reading.reading_time,
+                        suppression_rule=suppression_rule
+                    )
+                    is_new = True
+                    if suppression_rule:
+                        suppressed_count += 1
             else:
                 alarm = create_alarm(
                     db, sensor, alarm_type, threshold,
-                    reading.temperature, reading.reading_time
+                    reading.temperature, reading.reading_time,
+                    suppression_rule=suppression_rule
                 )
                 is_new = True
+                if suppression_rule:
+                    suppressed_count += 1
 
-    return alarm, None, is_new, new_secondary_alarms, updated_secondary_alarms
+    return alarm, None, is_new, new_secondary_alarms, updated_secondary_alarms, suppressed_count
 
 
 def import_readings(db: Session, readings: List[TemperatureReadingCreate]) -> ReadingImportResult:
@@ -241,12 +304,14 @@ def import_readings(db: Session, readings: List[TemperatureReadingCreate]) -> Re
     errors = []
     new_alarms = 0
     updated_alarms = 0
+    suppressed_alarms = 0
     new_alarm_ids = set()
     updated_alarm_ids = set()
+    suppressed_alarm_ids = set()
 
     for reading in sorted_readings:
         try:
-            alarm, error, is_new, new_secondary, updated_secondary = process_reading(db, reading)
+            alarm, error, is_new, new_secondary, updated_secondary, suppr_count = process_reading(db, reading)
             if error:
                 failed += 1
                 errors.append(f"{reading.sensor_code} @ {reading.reading_time}: {error}")
@@ -255,10 +320,14 @@ def import_readings(db: Session, readings: List[TemperatureReadingCreate]) -> Re
                 if alarm:
                     if is_new:
                         new_alarm_ids.add(alarm.id)
+                        if alarm.status == AlarmStatusEnum.SUPPRESSED:
+                            suppressed_alarm_ids.add(alarm.id)
                     else:
                         updated_alarm_ids.add(alarm.id)
                 for sec_alarm in new_secondary:
                     new_alarm_ids.add(sec_alarm.id)
+                    if sec_alarm.status == AlarmStatusEnum.SUPPRESSED:
+                        suppressed_alarm_ids.add(sec_alarm.id)
                 for sec_alarm in updated_secondary:
                     updated_alarm_ids.add(sec_alarm.id)
         except Exception as e:
@@ -267,6 +336,7 @@ def import_readings(db: Session, readings: List[TemperatureReadingCreate]) -> Re
 
     updated_alarms = len(updated_alarm_ids - new_alarm_ids)
     new_alarms = len(new_alarm_ids)
+    suppressed_alarms = len(suppressed_alarm_ids)
 
     db.commit()
 
@@ -276,7 +346,8 @@ def import_readings(db: Session, readings: List[TemperatureReadingCreate]) -> Re
         failed=failed,
         errors=errors,
         new_alarms=new_alarms,
-        updated_alarms=updated_alarms
+        updated_alarms=updated_alarms,
+        suppressed_alarms=suppressed_alarms
     )
 
 
@@ -344,6 +415,13 @@ def get_alarm_detail(db: Session, alarm_id: int) -> Optional[dict]:
     sensor = db.query(Sensor).filter(Sensor.id == alarm.sensor_id).first()
     zone = db.query(Zone).filter(Zone.id == sensor.zone_id).first() if sensor else None
 
+    suppression_rule = None
+    suppression_rule_reason = None
+    if alarm.suppression_rule_id:
+        suppression_rule = crud.get_suppression_rule(db, alarm.suppression_rule_id)
+        if suppression_rule:
+            suppression_rule_reason = suppression_rule.reason
+
     confirmations = []
     for conf in alarm.confirmations:
         person = db.query(Person).filter(Person.id == conf.person_id).first()
@@ -367,6 +445,8 @@ def get_alarm_detail(db: Session, alarm_id: int) -> Optional[dict]:
         "zone_name": zone.name if zone else "Unknown",
         "alarm_type": alarm.alarm_type,
         "status": alarm.status,
+        "suppression_rule_id": alarm.suppression_rule_id,
+        "suppression_rule_reason": suppression_rule_reason,
         "trigger_value": alarm.trigger_value,
         "trigger_time": alarm.trigger_time,
         "latest_value": alarm.latest_value,

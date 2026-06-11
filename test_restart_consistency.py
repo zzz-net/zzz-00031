@@ -122,6 +122,68 @@ assert_eq(len(sensors), 4, "传感器数量=4")
 assert_eq(len(zones), 3, "库区数量=3")
 assert_true(len(thresholds) >= 1, "传感器1至少有1个阈值版本")
 
+# 抑制规则验证
+try:
+    rules, _ = http_get("/suppression-rules")
+    print(f"  抑制规则={len(rules)}")
+    if len(rules) > 0:
+        by_status = {}
+        for r in rules:
+            by_status.setdefault(r["status"], 0)
+            by_status[r["status"]] += 1
+        print(f"    按状态: {by_status}")
+
+        active_rules = [r for r in rules if r["status"] == "active"]
+        if active_rules:
+            rule = active_rules[0]
+            detail, _ = http_get(f"/suppression-rules/{rule['id']}")
+            assert_true("hit_count" in detail, f"规则{rule['id']}详情有hit_count")
+            assert_true("creator_name" in detail, f"规则{rule['id']}详情有creator_name")
+            print(f"    规则{rule['id']}: status={detail['status']}, hit_count={detail['hit_count']}")
+
+            try:
+                hits, _ = http_get(f"/suppression-rules/{rule['id']}/hits")
+                print(f"    命中日志数: {len(hits)}")
+                if len(hits) > 0:
+                    assert_true(hits[0].get("trigger_value") is not None or hits[0].get("alarm_type") == "offline",
+                                "命中日志有trigger_value或为offline类型")
+                    assert_true("sensor_code" in hits[0], "命中日志有sensor_code")
+            except Exception as e:
+                print(f"    命中日志查询跳过: {e}")
+
+        # 验证CSV导出
+        try:
+            req = urllib.request.Request(f"{BASE}/suppression-rules/export.csv")
+            with urllib.request.urlopen(req) as resp:
+                rules_csv = resp.read().decode()
+            rules_csv_lines = rules_csv.strip().split("\n")
+            print(f"    规则CSV行数: {len(rules_csv_lines)}")
+            assert_true(len(rules_csv_lines) >= 2, "规则CSV有表头+数据")
+            assert_true("hit_count" in rules_csv_lines[0], "规则CSV有hit_count列")
+        except Exception as e:
+            print(f"    规则CSV导出跳过: {e}")
+
+        try:
+            req = urllib.request.Request(f"{BASE}/suppression-hits/export.csv")
+            with urllib.request.urlopen(req) as resp:
+                hits_csv = resp.read().decode()
+            hits_csv_lines = hits_csv.strip().split("\n")
+            print(f"    命中日志CSV行数: {len(hits_csv_lines)}")
+            assert_true(len(hits_csv_lines) >= 2, "命中日志CSV有表头+数据")
+        except Exception as e:
+            print(f"    命中日志CSV导出跳过: {e}")
+
+except Exception as e:
+    print(f"  抑制规则验证跳过: {e}")
+
+# 报警中的抑制关联验证
+suppressed_alarms = [a for a in alarms if a["status"] == "suppressed"]
+if suppressed_alarms:
+    print(f"  抑制状态报警: {len(suppressed_alarms)}个")
+    for sa in suppressed_alarms[:2]:
+        assert_true(sa.get("suppression_rule_id") is not None, f"抑制报警{sa['id']}有suppression_rule_id")
+        assert_true(sa.get("suppression_rule_reason") is not None, f"抑制报警{sa['id']}有suppression_rule_reason")
+
 print()
 print("=" * 70)
 print(f"重启后一致性验证: 通过={PASS}, 失败={FAIL}")

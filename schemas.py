@@ -193,7 +193,7 @@ class AlarmStatusUpdate(BaseModel):
 
 class AlarmCloseUpdate(BaseModel):
     person_id: int
-    resolution_note: str
+    resolution_note: Optional[str] = None
 
 
 class AlarmSuppressUpdate(BaseModel):

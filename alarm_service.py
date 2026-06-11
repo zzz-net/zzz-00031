@@ -62,6 +62,25 @@ def has_recent_alarm_in_dedup_window(
     )
 
 
+def get_last_reading(db: Session, sensor_id: int) -> Optional[TemperatureReading]:
+    return (
+        db.query(TemperatureReading)
+        .filter(TemperatureReading.sensor_id == sensor_id)
+        .order_by(desc(TemperatureReading.reading_time))
+        .first()
+    )
+
+
+def get_sensor_earliest_reading_time(db: Session, sensor_id: int) -> Optional[datetime]:
+    first_reading = (
+        db.query(TemperatureReading)
+        .filter(TemperatureReading.sensor_id == sensor_id)
+        .order_by(TemperatureReading.reading_time)
+        .first()
+    )
+    return first_reading.reading_time if first_reading else None
+
+
 def create_alarm(
     db: Session,
     sensor: Sensor,
@@ -96,6 +115,20 @@ def update_alarm_latest(
     db.flush()
 
 
+def close_offline_alarm_on_recovery(
+    db: Session,
+    sensor: Sensor,
+    recovery_time: datetime
+):
+    active_offline = get_active_alarm(db, sensor.id, AlarmTypeEnum.OFFLINE)
+    if active_offline:
+        if recovery_time >= active_offline.trigger_time:
+            active_offline.latest_time = recovery_time
+            if recovery_time > (active_offline.latest_time or active_offline.trigger_time):
+                active_offline.latest_time = recovery_time
+        db.flush()
+
+
 def check_alarm_condition(
     temperature: float,
     threshold: ThresholdVersion
@@ -107,17 +140,60 @@ def check_alarm_condition(
     return None
 
 
-def process_reading(db: Session, reading: TemperatureReadingCreate) -> Tuple[Optional[Alarm], Optional[str], bool]:
+def process_reading(db: Session, reading: TemperatureReadingCreate) -> Tuple[
+    Optional[Alarm], Optional[str], bool, List[Alarm], List[Alarm]
+]:
+    """
+    返回: (主报警对象, 错误信息, 主报警是否新报警, 新产生的辅助报警列表, 更新的辅助报警列表)
+    """
     sensor = db.query(Sensor).filter(Sensor.code == reading.sensor_code).first()
     if not sensor:
-        return None, f"Sensor {reading.sensor_code} not found", False
+        return None, f"Sensor {reading.sensor_code} not found", False, [], []
 
     if not sensor.is_active:
-        return None, f"Sensor {reading.sensor_code} is inactive", False
+        return None, f"Sensor {reading.sensor_code} is inactive", False, [], []
 
     threshold = get_active_threshold(db, sensor.id, reading.reading_time)
     if not threshold:
-        return None, f"No active threshold for sensor {reading.sensor_code} at {reading.reading_time}", False
+        return None, f"No active threshold for sensor {reading.sensor_code} at {reading.reading_time}", False, [], []
+
+    last_reading = get_last_reading(db, sensor.id)
+    new_secondary_alarms = []
+    updated_secondary_alarms = []
+
+    if last_reading:
+        earliest_time = get_sensor_earliest_reading_time(db, sensor.id)
+        if reading.reading_time < earliest_time:
+            return None, (
+                f"Reading time {reading.reading_time} is earlier than existing earliest reading "
+                f"{earliest_time} for sensor {reading.sensor_code}, out-of-order rejected"
+            ), False, [], []
+        if reading.reading_time < last_reading.reading_time:
+            return None, (
+                f"Reading time {reading.reading_time} is earlier than last reading "
+                f"{last_reading.reading_time} for sensor {reading.sensor_code}, out-of-order rejected"
+            ), False, [], []
+
+        gap_minutes = (reading.reading_time - last_reading.reading_time).total_seconds() / 60.0
+        offline_timeout = sensor.offline_timeout_minutes or 30
+        if gap_minutes > offline_timeout:
+            offline_trigger_time = last_reading.reading_time + timedelta(minutes=offline_timeout)
+            active_offline = get_active_alarm(db, sensor.id, AlarmTypeEnum.OFFLINE)
+
+            if not active_offline:
+                offline_alarm = create_alarm(
+                    db, sensor, AlarmTypeEnum.OFFLINE, threshold=None,
+                    trigger_value=None, trigger_time=offline_trigger_time
+                )
+                offline_alarm.latest_time = reading.reading_time
+                db.flush()
+                new_secondary_alarms.append(offline_alarm)
+            else:
+                if reading.reading_time > (active_offline.latest_time or active_offline.trigger_time):
+                    update_alarm_latest(db, active_offline, None, reading.reading_time)
+                    updated_secondary_alarms.append(active_offline)
+                else:
+                    updated_secondary_alarms.append(active_offline)
 
     db_reading = TemperatureReading(
         sensor_id=sensor.id,
@@ -135,8 +211,6 @@ def process_reading(db: Session, reading: TemperatureReadingCreate) -> Tuple[Opt
         active_alarm = get_active_alarm(db, sensor.id, alarm_type)
 
         if active_alarm:
-            if reading.reading_time < active_alarm.trigger_time:
-                return None, None, False
             if reading.reading_time > (active_alarm.latest_time or active_alarm.trigger_time):
                 update_alarm_latest(db, active_alarm, reading.temperature, reading.reading_time)
                 alarm = active_alarm
@@ -155,7 +229,7 @@ def process_reading(db: Session, reading: TemperatureReadingCreate) -> Tuple[Opt
                 )
                 is_new = True
 
-    return alarm, None, is_new
+    return alarm, None, is_new, new_secondary_alarms, updated_secondary_alarms
 
 
 def import_readings(db: Session, readings: List[TemperatureReadingCreate]) -> ReadingImportResult:
@@ -172,7 +246,7 @@ def import_readings(db: Session, readings: List[TemperatureReadingCreate]) -> Re
 
     for reading in sorted_readings:
         try:
-            alarm, error, is_new = process_reading(db, reading)
+            alarm, error, is_new, new_secondary, updated_secondary = process_reading(db, reading)
             if error:
                 failed += 1
                 errors.append(f"{reading.sensor_code} @ {reading.reading_time}: {error}")
@@ -183,12 +257,16 @@ def import_readings(db: Session, readings: List[TemperatureReadingCreate]) -> Re
                         new_alarm_ids.add(alarm.id)
                     else:
                         updated_alarm_ids.add(alarm.id)
+                for sec_alarm in new_secondary:
+                    new_alarm_ids.add(sec_alarm.id)
+                for sec_alarm in updated_secondary:
+                    updated_alarm_ids.add(sec_alarm.id)
         except Exception as e:
             failed += 1
             errors.append(f"{reading.sensor_code} @ {reading.reading_time}: {str(e)}")
 
-    new_alarms = len(new_alarm_ids)
     updated_alarms = len(updated_alarm_ids - new_alarm_ids)
+    new_alarms = len(new_alarm_ids)
 
     db.commit()
 

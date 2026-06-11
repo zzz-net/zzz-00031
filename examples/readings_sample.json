@@ -1,0 +1,20 @@
+[
+  {"sensor_code": "TEMP-001", "temperature": -18.5, "reading_time": "2026-06-12T08:00:00"},
+  {"sensor_code": "TEMP-001", "temperature": -18.2, "reading_time": "2026-06-12T08:05:00"},
+  {"sensor_code": "TEMP-001", "temperature": -17.8, "reading_time": "2026-06-12T08:10:00"},
+  {"sensor_code": "TEMP-001", "temperature": -17.0, "reading_time": "2026-06-12T08:15:00"},
+  {"sensor_code": "TEMP-001", "temperature": -15.5, "reading_time": "2026-06-12T08:20:00"},
+  {"sensor_code": "TEMP-001", "temperature": -14.2, "reading_time": "2026-06-12T08:25:00"},
+  {"sensor_code": "TEMP-001", "temperature": -13.8, "reading_time": "2026-06-12T08:30:00"},
+  {"sensor_code": "TEMP-001", "temperature": -13.5, "reading_time": "2026-06-12T08:35:00"},
+  {"sensor_code": "TEMP-002", "temperature": -22.0, "reading_time": "2026-06-12T08:00:00"},
+  {"sensor_code": "TEMP-002", "temperature": -22.5, "reading_time": "2026-06-12T08:05:00"},
+  {"sensor_code": "TEMP-002", "temperature": -23.0, "reading_time": "2026-06-12T08:10:00"},
+  {"sensor_code": "TEMP-002", "temperature": -24.5, "reading_time": "2026-06-12T08:15:00"},
+  {"sensor_code": "TEMP-002", "temperature": -25.2, "reading_time": "2026-06-12T08:20:00"},
+  {"sensor_code": "TEMP-003", "temperature": 2.5, "reading_time": "2026-06-12T08:00:00"},
+  {"sensor_code": "TEMP-003", "temperature": 3.0, "reading_time": "2026-06-12T08:05:00"},
+  {"sensor_code": "TEMP-003", "temperature": 4.2, "reading_time": "2026-06-12T08:10:00"},
+  {"sensor_code": "TEMP-003", "temperature": 5.8, "reading_time": "2026-06-12T08:15:00"},
+  {"sensor_code": "TEMP-003", "temperature": 7.2, "reading_time": "2026-06-12T08:20:00"}
+]

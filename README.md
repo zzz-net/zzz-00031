@@ -347,32 +347,34 @@ curl -X POST http://localhost:8000/readings/import \
 
 ---
 
-### 八、报警抑制规则
+### 八、报警静音计划（抑制规则）
 
-值班人员可给指定传感器或库区设置临时抑制窗口。窗口内读数仍正常入库，但符合抑制条件的报警不会变成 `open`，而是标记为 `suppressed`，同时生成命中日志（suppression_hits）记录触发值、时间和命中规则。
+值班人员可给指定传感器或库区设置**临时静音窗口**（也叫抑制规则）。窗口内读数仍正常入库，但符合静音条件的报警不会变成 `open` 进入待处理列表，而是标记为 `suppressed`，同时生成命中日志（suppression_hits）记录触发值、时间和关联的静音计划，全程可追溯。
 
-#### 抑制规则属性
+#### 静音计划属性
 
 | 属性 | 类型 | 必填 | 说明 |
 |------|------|------|------|
-| `sensor_id` | int | 否 | 按传感器抑制（与 zone_id 二选一或同时） |
-| `zone_id` | int | 否 | 按库区抑制（与 sensor_id 二选一或同时） |
-| `alarm_type` | str | 否 | 按报警类型抑制：`over_temp` / `under_temp` / `offline`，留空表示全部 |
-| `start_time` | datetime | 是 | 抑制窗口开始时间 |
-| `end_time` | datetime | 是 | 抑制窗口结束时间，必须晚于 start_time |
-| `reason` | str | 是 | 抑制原因，如"设备检修"、"库区维护" |
+| `sensor_id` | int | 否 | 按传感器静音（与 zone_id 二选一或同时） |
+| `zone_id` | int | 否 | 按库区静音（与 sensor_id 二选一或同时） |
+| `alarm_type` | str | 否 | 按报警类型静音：`over_temp` / `under_temp` / `offline`，留空表示全部 |
+| `start_time` | datetime | 是 | 静音窗口开始时间 |
+| `end_time` | datetime | 是 | 静音窗口结束时间，必须晚于 start_time |
+| `reason` | str | 是 | 静音原因，如"设备检修"、"库区维护" |
 | `created_by` | int | 是 | 创建人 ID（必须是 admin 或 operator） |
 
 #### 约束条件
 
 - **禁止时间重叠**：相同范围（传感器/库区/类型有交集）的 active 规则不能时间重叠
 - **禁止结束早于开始**：`end_time` 必须严格大于 `start_time`
-- **权限约束**：只有 admin 和 operator 可以创建/撤销抑制规则，observer 只能查看
+- **至少一个范围**：`sensor_id` 和 `zone_id` 不能同时为空
+- **权限约束**：只有 admin 和 operator 可以创建/撤销静音计划，observer 只能查看
 - **审计追踪**：每条 suppressed 报警都有对应 suppression_rule_id 和命中日志
 - **到期自动恢复**：窗口结束后新异常读数正常生成 open 报警
 - **撤销恢复**：撤销规则后新异常读数正常生成 open 报警
+- **统一命中逻辑**：JSON 导入、CSV 导入、直接提交读数走同一套命中逻辑
 
-#### 1. 创建抑制规则（按传感器 + 类型）
+#### 1. 创建静音计划（按传感器 + 类型）
 
 ```bash
 curl -X POST http://localhost:8000/suppression-rules \
@@ -389,7 +391,7 @@ curl -X POST http://localhost:8000/suppression-rules \
 
 预期结果：返回 200，包含规则详情（status=active）。
 
-#### 2. 创建抑制规则（按库区，全部类型）
+#### 2. 创建静音计划（按库区，全部类型）
 
 ```bash
 curl -X POST http://localhost:8000/suppression-rules \
@@ -403,7 +405,7 @@ curl -X POST http://localhost:8000/suppression-rules \
   }'
 ```
 
-#### 3. 查看抑制规则列表
+#### 3. 查看静音计划列表
 
 ```bash
 # 全部规则
@@ -416,7 +418,7 @@ curl -X GET "http://localhost:8000/suppression-rules?status=active"
 curl -X GET "http://localhost:8000/suppression-rules?sensor_id=1"
 ```
 
-#### 4. 查看抑制规则详情
+#### 4. 查看静音计划详情
 
 ```bash
 curl -X GET http://localhost:8000/suppression-rules/1
@@ -424,7 +426,7 @@ curl -X GET http://localhost:8000/suppression-rules/1
 
 预期结果：包含规则信息、创建人姓名、命中次数（hit_count）等。
 
-#### 5. 撤销抑制规则
+#### 5. 撤销静音计划
 
 ```bash
 curl -X POST http://localhost:8000/suppression-rules/1/revoke \
@@ -434,7 +436,7 @@ curl -X POST http://localhost:8000/suppression-rules/1/revoke \
 
 预期结果：返回 200，规则状态变为 revoked。撤销后新异常读数会正常生成 open 报警。
 
-#### 6. 查看抑制命中日志
+#### 6. 查看静音命中日志
 
 ```bash
 curl -X GET http://localhost:8000/suppression-rules/1/hits
@@ -442,19 +444,78 @@ curl -X GET http://localhost:8000/suppression-rules/1/hits
 
 预期结果：每条命中包含 rule_id、alarm_id、sensor_code、alarm_type、trigger_value、trigger_time。
 
-#### 7. 导出抑制规则 CSV
+#### 7. 导出静音计划 CSV
 
 ```bash
 curl -X GET "http://localhost:8000/suppression-rules/export.csv" -o suppression_rules.csv
 ```
 
-#### 8. 导出抑制命中日志 CSV
+#### 8. 导出静音命中日志 CSV
 
 ```bash
 curl -X GET "http://localhost:8000/suppression-hits/export.csv" -o suppression_hits.csv
 ```
 
-#### 9. 失败场景：时间重叠冲突
+#### 9. 失败场景
+
+##### 场景 1：observer 不能创建静音计划（403）
+
+```bash
+curl -X POST http://localhost:8000/suppression-rules \
+  -H "Content-Type: application/json" \
+  -d '{
+    "sensor_id": 1,
+    "start_time": "2026-06-18T00:00:00",
+    "end_time": "2026-06-18T23:59:59",
+    "reason": "observer尝试创建",
+    "created_by": 3
+  }'
+```
+
+预期结果：返回 403，提示 "Permission denied: only admin or operator can create suppression rules"
+
+##### 场景 2：observer 不能撤销静音计划（403）
+
+```bash
+curl -X POST http://localhost:8000/suppression-rules/1/revoke \
+  -H "Content-Type: application/json" \
+  -d '{"person_id": 3}'
+```
+
+预期结果：返回 403，提示 "Permission denied: only admin or operator can revoke suppression rules"
+
+##### 场景 3：结束时间早于开始时间（400）
+
+```bash
+curl -X POST http://localhost:8000/suppression-rules \
+  -H "Content-Type: application/json" \
+  -d '{
+    "sensor_id": 1,
+    "start_time": "2026-06-19T12:00:00",
+    "end_time": "2026-06-19T10:00:00",
+    "reason": "时间错误",
+    "created_by": 1
+  }'
+```
+
+预期结果：返回 400，提示 "End time must be after start time"
+
+##### 场景 4：缺少 sensor_id 和 zone_id（400）
+
+```bash
+curl -X POST http://localhost:8000/suppression-rules \
+  -H "Content-Type: application/json" \
+  -d '{
+    "start_time": "2026-06-20T00:00:00",
+    "end_time": "2026-06-20T23:59:59",
+    "reason": "缺少范围",
+    "created_by": 1
+  }'
+```
+
+预期结果：返回 400，提示 "Either sensor_id or zone_id must be provided"
+
+##### 场景 5：时间重叠冲突（409）
 
 ```bash
 # 先创建一条 active 规则
@@ -462,8 +523,8 @@ curl -X POST http://localhost:8000/suppression-rules \
   -H "Content-Type: application/json" \
   -d '{
     "sensor_id": 1,
-    "start_time": "2026-06-17T00:00:00",
-    "end_time": "2026-06-17T23:59:59",
+    "start_time": "2026-06-21T00:00:00",
+    "end_time": "2026-06-21T23:59:59",
     "reason": "测试冲突1",
     "created_by": 1
   }'
@@ -473,14 +534,64 @@ curl -X POST http://localhost:8000/suppression-rules \
   -H "Content-Type: application/json" \
   -d '{
     "sensor_id": 1,
-    "start_time": "2026-06-17T12:00:00",
-    "end_time": "2026-06-18T12:00:00",
+    "start_time": "2026-06-21T12:00:00",
+    "end_time": "2026-06-22T12:00:00",
     "reason": "测试冲突2",
     "created_by": 1
   }'
 ```
 
 预期结果：第二条返回 409 Conflict，提示与现有规则冲突。
+
+##### 场景 6：旧手工抑制端点已移除（404）
+
+```bash
+curl -X POST http://localhost:8000/alarms/1/suppress \
+  -H "Content-Type: application/json" \
+  -d '{"person_id": 1, "note": "尝试旧抑制", "suppress_minutes": 60}'
+```
+
+预期结果：返回 404（或 405/400），旧端点已被移除，只能通过静音计划实现抑制。
+
+#### 10. 完整流程示例：传感器检修静音
+
+```bash
+# 步骤1: operator 创建按传感器的静音计划（24小时窗口）
+curl -X POST http://localhost:8000/suppression-rules \
+  -H "Content-Type: application/json" \
+  -d '{
+    "sensor_id": 1,
+    "start_time": "2026-07-01T00:00:00",
+    "end_time": "2026-07-01T23:59:59",
+    "reason": "TEMP-001传感器年度校准检修",
+    "created_by": 2
+  }'
+
+# 步骤2: 导入超温读数（在静音窗口内）
+curl -X POST http://localhost:8000/readings/import \
+  -H "Content-Type: application/json" \
+  -d '[{"sensor_code": "TEMP-001", "temperature": -10.0, "reading_time": "2026-07-01T10:00:00"}]'
+
+# 预期: successful=1, suppressed_alarms=1，读数正常入库，报警被静音
+
+# 步骤3: 查看被静音的报警
+curl -X GET "http://localhost:8000/alarms?status=suppressed"
+
+# 步骤4: 查看静音命中日志
+curl -X GET http://localhost:8000/suppression-rules/1/hits
+
+# 步骤5: 提前完成检修，撤销静音计划
+curl -X POST http://localhost:8000/suppression-rules/1/revoke \
+  -H "Content-Type: application/json" \
+  -d '{"person_id": 2}'
+
+# 步骤6: 撤销后再导入超温读数，应产生正常 open 报警
+curl -X POST http://localhost:8000/readings/import \
+  -H "Content-Type: application/json" \
+  -d '[{"sensor_code": "TEMP-001", "temperature": -9.0, "reading_time": "2026-07-01T14:00:00"}]'
+
+# 预期: new_alarms>=1, suppressed_alarms=0，新报警为 open 状态
+```
 
 ---
 
@@ -520,7 +631,15 @@ python test_suppression_comprehensive.py
 ### 3. 重启后一致性验证
 
 ```bash
-# 先跑一轮 test_suppression_comprehensive.py，然后重启 uvicorn
+# 先运行一轮综合测试产生数据
+python test_suppression_comprehensive.py
+
+# 重启服务（停止后再启动）
+# 方式1：如果用 --reload 模式，修改任意 .py 文件保存即可自动重启
+# 方式2：手动停止 uvicorn 后重新启动
+uvicorn main:app --host 0.0.0.0 --port 8000
+
+# 等待服务启动后运行一致性验证
 python test_restart_consistency.py
 ```
 
@@ -531,8 +650,9 @@ python test_restart_consistency.py
 - 报警 CSV/JSON 导出行数、ID 集合与 API 查询一致
 - 温度读数 CSV/API 条数一致
 - 配置数据（人员/传感器/库区/阈值版本）完整保留
-- **抑制规则**：规则列表、状态、命中日志、CSV 导出跨重启一致
+- **静音计划（抑制规则）**：规则列表、状态、命中日志、CSV 导出跨重启一致
 - **suppressed 状态报警**：suppression_rule_id 和 suppression_rule_reason 完整保留
+- 静音命中记录可追溯：每条 suppressed 报警都能在命中日志中找到对应记录
 
 ---
 
@@ -547,10 +667,10 @@ python test_restart_consistency.py
 | `sensors` | 传感器信息 |
 | `threshold_versions` | 阈值版本（版本化管理） |
 | `temperature_readings` | 温度读数 |
-| `alarms` | 报警记录（含 suppression_rule_id 关联抑制规则） |
+| `alarms` | 报警记录（含 suppression_rule_id 关联静音计划） |
 | `alarm_confirmations` | 报警状态变更记录 |
-| `suppression_rules` | 抑制规则（支持按传感器/库区/类型 + 时间窗口） |
-| `suppression_hits` | 抑制命中日志（记录触发值、时间、关联报警和规则） |
+| `suppression_rules` | 静音计划（支持按传感器/库区/类型 + 时间窗口） |
+| `suppression_hits` | 静音命中日志（记录触发值、时间、关联报警和计划） |
 
 服务重启后，所有数据保留，查询和导出结果一致。
 
@@ -559,15 +679,18 @@ python test_restart_consistency.py
 ```
 .
 ├── main.py                    # 主应用入口，API 路由
-├── models.py                  # SQLAlchemy 数据模型（含 SuppressionRule / SuppressionHit）
+├── models.py                  # SQLAlchemy 数据模型（含静音计划 SuppressionRule / SuppressionHit）
 ├── schemas.py                 # Pydantic 请求/响应模式
-├── crud.py                    # 基础 CRUD 操作（含抑制规则 CRUD）
-├── alarm_service.py           # 报警核心业务逻辑（含抑制命中处理）
+├── crud.py                    # 基础 CRUD 操作（含静音计划 CRUD）
+├── alarm_service.py           # 报警核心业务逻辑（含静音命中处理）
 ├── database.py                # 数据库连接配置
 ├── init_data.py               # 样例数据初始化脚本
 ├── test_alarm_fixes.py        # 复现与回归测试脚本
-├── test_suppression_comprehensive.py  # 抑制规则综合测试
+├── test_suppression_basic.py  # 静音计划基础测试
+├── test_suppression_comprehensive.py  # 静音计划综合测试
+├── test_suppression_regression.py     # 静音计划回归测试（旧手工抑制漏洞）
 ├── test_restart_consistency.py# 重启后一致性测试
+├── test_final_verify.py       # 最终验证脚本（README 文档示例验证）
 ├── requirements.txt           # Python 依赖
 ├── examples/                  # 样例数据
 │   ├── readings_sample.json

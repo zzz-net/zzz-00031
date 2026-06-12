@@ -38,9 +38,9 @@ uvicorn main:app --reload --host 0.0.0.0 --port 8000
 
 | 角色 | 权限 |
 |------|------|
-| `admin` | 所有操作，包括关闭报警、管理抑制规则 |
-| `operator` | 确认、处理中、升级、关闭报警、管理抑制规则 |
-| `observer` | 仅查看，不能操作报警、不能创建/撤销抑制规则 |
+| `admin` | 所有操作，包括关闭报警、管理抑制规则、管理巡检模板、生成巡检工单 |
+| `operator` | 确认、处理中、升级、关闭报警、管理抑制规则、领取/填写/完成巡检工单 |
+| `observer` | 仅查看，不能操作报警、不能创建/撤销抑制规则、不能管理巡检模板和工单 |
 
 ### 报警状态
 
@@ -597,7 +597,7 @@ curl -X POST http://localhost:8000/readings/import \
 
 ## 自动化测试
 
-项目包含 3 个 Python 测试脚本，用于回归验证所有用户可见行为。
+项目包含 5 个 Python 测试脚本，用于回归验证所有用户可见行为。
 
 ### 1. 复现与回归测试（修复项验证）
 
@@ -656,6 +656,51 @@ python test_restart_consistency.py
 - **交接班巡检清单**：清单数据、检查项快照（阈值/读数/报警数）、检查结果、处理人信息完整保留
 - 快照不变性：重启后传感器快照阈值、最近读数、未处理报警数与创建时一致
 - 导出一致性：CSV/JSON 导出的报警数量和检查项状态与 API 查询一致
+- **冷库巡检工单**：模板状态（draft/active/disabled）、巡检点配置、工单状态（pending/claimed/completed）、检查项填写数据（温度、照片、备注、异常处理）、关联报警（含 alarm_snapshot 快照）、操作日志完整保留
+- 巡检逾期计算：重启后非 completed 工单的 is_overdue 标记仍按 deadline 与当前时间正确计算
+- 巡检导出一致性：重启后工单 CSV/JSON 导出的 ID 集合与列表 API 完全一致，单条工单明细导出与详情 API 字段一致
+
+### 4. 冷库巡检工单综合测试
+
+```bash
+python test_inspection.py
+```
+
+覆盖内容（337 项用例，全部通过）：
+- **权限验证**：admin/operator/observer 三角色权限矩阵全覆盖（模板管理、工单生成/领取/填写/完成、报警关联等）
+- **模板状态流转**：draft → active → disabled → active（停用后可重新启用）
+- **模板不可变性**：active 和 disabled 模板字段、巡检点均不可修改（增删改全部拦截）
+- **工单生成冲突**：同一库区同一日期同一班次重复生成返回 409 Conflict
+- **工单生命周期**：pending → claimed → completed，全部检查项完成才能提交
+- **检查项填写**：温度复核、照片 URL 列表（photo_urls）、备注、异常处理动作、处理人、状态（normal/abnormal）
+- **逾期自动标记**：非 completed 工单超过 deadline 自动标记 is_overdue=true（运行时计算）
+- **报警关联**：关联已有报警并保存 alarm_snapshot JSON 快照，解除关联，快照不受后续报警状态变化影响
+- **操作日志审计**：生成、领取、检查项更新、完成、报警关联/解除全部生成可追溯日志
+- **多条件筛选**：按库区、状态、负责人（claimed_by）、班次、日期范围、是否逾期筛选
+- **导出一致性**：工单列表 CSV/JSON 导出与列表 API ID 集合完全一致；单条工单明细导出与详情 API（items/associated_alarms/logs）字段完全一致
+
+### 5. 冷库巡检工单跨重启一致性验证
+
+```bash
+# 先运行综合测试产生数据
+python test_inspection.py
+
+# 重启服务（停止后再启动）
+uvicorn main:app --host 0.0.0.0 --port 8000
+
+# 等待服务启动后运行一致性验证
+python test_inspection_restart.py
+```
+
+覆盖内容（128 项用例，全部通过）：
+- 模板数据持久化：列表数量、状态、巡检点配置跨重启一致
+- 工单状态持久化：pending/claimed/completed 状态、领取人、完成时间、deadline 完整保留
+- 检查项数据持久化：温度值、photo_urls 列表、备注、异常处理、状态、处理人信息完整保留
+- 操作日志持久化：所有日志条目（action、operator、detail、timestamp）完整保留
+- 关联报警持久化：关联记录、alarm_snapshot JSON 快照（含报警详情、确认、处理日志）完整保留
+- 逾期计算正确性：重启后 is_overdue 按 deadline 与当前时间重新计算
+- 导出一致性：重启后工单 CSV/JSON/list/detail 导出与 API 数据完全一致
+- 权限约束持久化：重启后权限控制仍然生效（observer 仍不能创建/操作）
 
 ---
 
@@ -682,6 +727,12 @@ python test_restart_consistency.py
 | `drill_judgments` | 演练逐条判定明细 |
 | `drill_alarm_changes` | 演练报警变化记录 |
 | `drill_operation_logs` | 演练操作日志 |
+| `inspection_templates` | 巡检工单模板（按库区+班次配置，含 draft/active/disabled 状态） |
+| `inspection_checkpoints` | 模板巡检点（名称、描述、是否需照片/温度、排序） |
+| `inspection_work_orders` | 巡检工单（从模板生成，含截止时间、状态、领取人、完成时间） |
+| `inspection_work_order_items` | 工单检查项（巡检点快照副本，含温度、照片URL、备注、异常处理、状态） |
+| `inspection_work_order_alarms` | 工单关联报警（含关联时报警快照 JSON） |
+| `inspection_work_order_logs` | 工单操作日志（生成、领取、填写、完成、关联/解除报警等） |
 
 服务重启后，所有数据保留，查询和导出结果一致。
 
@@ -1247,16 +1298,474 @@ curl -X GET http://localhost:8000/drills/1/export.json -o drill_1_export.json
 
 ---
 
+## 十一、冷库巡检工单
+
+主管可按库区、班次、巡检点和截止时间创建巡检工单模板，再按日期生成当天工单；operator 可领取工单、逐项填写温度复核、上传照片（URL 占位）、填写备注、异常处理动作和完成时间；observer 只能查看。工单支持按库区、状态、负责人筛选，过截止时间自动标记 overdue，可关联已有报警（含报警快照与处理日志）。模板启用/停用后历史字段不可修改，同一库区同一班次重复生成报冲突（409）。
+
+### 模板状态
+
+| 状态 | 说明 |
+|------|------|
+| `draft` | 草稿，可修改模板字段、增删改巡检点 |
+| `active` | 已启用，不可修改字段和巡检点，可生成工单 |
+| `disabled` | 已停用，不可修改字段和巡检点，不可生成工单，但可重新启用 |
+
+### 工单状态
+
+| 状态 | 说明 |
+|------|------|
+| `pending` | 待领取，可被 operator 领取 |
+| `claimed` | 已领取，可填写检查项、完成工单 |
+| `completed` | 已完成，不可修改 |
+
+### 班次类型
+
+| 类型 | 起始时间 | 说明 |
+|------|----------|------|
+| `morning` | 08:00 | 早班 |
+| `afternoon` | 16:00 | 中班 |
+| `night` | 00:00 | 晚班 |
+
+工单截止时间 = 班次起始时间 + 模板 deadline_hours。
+
+### 巡检权限矩阵
+
+| 操作 | admin | operator | observer |
+|------|-------|----------|----------|
+| 创建模板 | ✅ | ❌ | ❌ |
+| 修改草稿模板 | ✅ | ❌ | ❌ |
+| 启用/停用模板 | ✅ | ❌ | ❌ |
+| 增删改巡检点（仅 draft） | ✅ | ❌ | ❌ |
+| 生成工单 | ✅ | ❌ | ❌ |
+| 领取工单 | ❌ | ✅ | ❌ |
+| 填写检查项 | ❌ | ✅（仅自己领取的） | ❌ |
+| 完成工单 | ❌ | ✅（仅自己领取的） | ❌ |
+| 关联/解除报警 | ✅ | ✅ | ❌ |
+| 查看模板/工单 | ✅ | ✅ | ✅ |
+| 导出工单 | ✅ | ✅ | ✅ |
+
+### 约束条件
+
+- **模板不可变**：模板一旦启用（active）或停用（disabled），模板字段和巡检点均不可修改；停用后可重新启用为 active
+- **禁止重复生成**：同一库区（zone_id）+ 同一日期（work_date）+ 同一班次（shift_type）只能有一条工单，重复生成返回 409 Conflict
+- **截止时间逾期**：非 completed 工单，若当前时间 > deadline，则 is_overdue=true（运行时计算）
+- **全部检查完成才能提交**：完成工单前所有检查项必须已检查（check_status != pending）
+- **数据持久化**：所有模板、工单、检查项、关联报警、操作日志均存入 SQLite，服务重启后完整保留
+
+### 1. 创建巡检模板（含巡检点）
+
+```bash
+curl -X POST http://localhost:8000/inspection-templates \
+  -H "Content-Type: application/json" \
+  -d '{
+    "zone_id": 1,
+    "shift_type": "morning",
+    "name": "冷冻库区A早班巡检",
+    "description": "每日早班巡检流程",
+    "deadline_hours": 4.0,
+    "created_by": 1,
+    "checkpoints": [
+      {"name": "1号冷风机运行状态", "description": "检查风机是否运转正常", "sort_order": 1, "require_photo": true, "require_temperature": false},
+      {"name": "2号冷风机运行状态", "description": "检查风机是否运转正常", "sort_order": 2, "require_photo": true, "require_temperature": false},
+      {"name": "库区温度复核", "description": "实测并记录库区温度", "sort_order": 3, "require_photo": false, "require_temperature": true},
+      {"name": "库门密封性检查", "description": "检查密封条是否完好", "sort_order": 4, "require_photo": true, "require_temperature": false}
+    ]
+  }'
+```
+
+预期结果：返回 200，status=draft，含 checkpoints 列表。
+
+### 2. 为草稿模板新增巡检点
+
+```bash
+curl -X POST http://localhost:8000/inspection-templates/1/checkpoints \
+  -H "Content-Type: application/json" \
+  -d '{"name": "应急照明检查", "description": "检查应急灯是否正常", "sort_order": 5, "require_photo": true, "require_temperature": false}'
+```
+
+### 3. 修改草稿巡检点
+
+```bash
+curl -X PUT http://localhost:8000/inspection-templates/1/checkpoints/1 \
+  -H "Content-Type: application/json" \
+  -d '{"name": "1号冷风机运行状态-更新", "require_photo": true}'
+```
+
+### 4. 删除草稿巡检点
+
+```bash
+curl -X DELETE http://localhost:8000/inspection-templates/1/checkpoints/5
+```
+
+### 5. 启用模板
+
+```bash
+curl -X POST http://localhost:8000/inspection-templates/1/activate \
+  -H "Content-Type: application/json" \
+  -d '{"person_id": 1}'
+```
+
+预期结果：status=active。启用后模板字段和巡检点不可再修改。
+
+### 6. 停用模板
+
+```bash
+curl -X POST http://localhost:8000/inspection-templates/1/disable \
+  -H "Content-Type: application/json" \
+  -d '{"person_id": 1}'
+```
+
+预期结果：status=disabled。停用后不可生成工单，但可重新 activate。
+
+### 7. 查看模板列表
+
+```bash
+# 全部模板
+curl -X GET http://localhost:8000/inspection-templates
+
+# 按库区筛选
+curl -X GET "http://localhost:8000/inspection-templates?zone_id=1"
+
+# 按状态筛选
+curl -X GET "http://localhost:8000/inspection-templates?status=active"
+
+# 按班次筛选
+curl -X GET "http://localhost:8000/inspection-templates?shift_type=morning"
+```
+
+### 8. 查看模板详情
+
+```bash
+curl -X GET http://localhost:8000/inspection-templates/1
+```
+
+预期结果：包含模板信息和完整 checkpoints 列表。
+
+### 9. 修改草稿模板字段
+
+```bash
+curl -X PUT http://localhost:8000/inspection-templates/1 \
+  -H "Content-Type: application/json" \
+  -d '{"name": "冷冻库区A早班巡检-修订", "deadline_hours": 5.0}'
+```
+
+仅 draft 状态可修改，active/disabled 返回错误。
+
+### 10. 从模板生成当日巡检工单
+
+```bash
+curl -X POST http://localhost:8000/inspection-work-orders/generate \
+  -H "Content-Type: application/json" \
+  -d '{"template_id": 1, "work_date": "2026-07-15", "created_by": 1}'
+```
+
+预期结果：返回 200，status=pending，items 为模板巡检点的副本（快照），deadline = 班次起始时间 + deadline_hours。
+
+### 11. 领取工单
+
+```bash
+curl -X POST http://localhost:8000/inspection-work-orders/1/claim \
+  -H "Content-Type: application/json" \
+  -d '{"person_id": 2}'
+```
+
+预期结果：status=claimed，claimed_by=2，claimed_at 记录领取时间。
+
+### 12. 填写巡检检查项
+
+```bash
+curl -X PUT http://localhost:8000/inspection-work-orders/1/items/1 \
+  -H "Content-Type: application/json" \
+  -d '{
+    "person_id": 2,
+    "check_status": "normal",
+    "photo_urls": ["http://example.com/photo1.jpg", "http://example.com/photo2.jpg"],
+    "remark": "设备运行正常，无异常噪音",
+    "exception_action": null,
+    "handler_id": null
+  }'
+```
+
+填写温度复核（需温度的检查项）：
+
+```bash
+curl -X PUT http://localhost:8000/inspection-work-orders/1/items/3 \
+  -H "Content-Type: application/json" \
+  -d '{
+    "person_id": 2,
+    "check_status": "abnormal",
+    "temperature_value": -14.5,
+    "remark": "温度偏高，超出阈值",
+    "exception_action": "已联系维修人员检查制冷机组",
+    "handler_id": 1
+  }'
+```
+
+### 13. 完成工单
+
+```bash
+curl -X POST http://localhost:8000/inspection-work-orders/1/complete \
+  -H "Content-Type: application/json" \
+  -d '{"person_id": 2, "general_remark": "本次巡检完成，发现1项温度异常，已安排处理"}'
+```
+
+预期结果：status=completed。所有检查项必须已检查（不能有 pending），否则返回 400。
+
+### 14. 查看工单列表
+
+```bash
+# 全部工单
+curl -X GET http://localhost:8000/inspection-work-orders
+
+# 按库区筛选
+curl -X GET "http://localhost:8000/inspection-work-orders?zone_id=1"
+
+# 按状态筛选
+curl -X GET "http://localhost:8000/inspection-work-orders?status=pending"
+
+# 按负责人（领取人）筛选
+curl -X GET "http://localhost:8000/inspection-work-orders?claimed_by=2"
+
+# 按班次筛选
+curl -X GET "http://localhost:8000/inspection-work-orders?shift_type=morning"
+
+# 按日期范围筛选
+curl -X GET "http://localhost:8000/inspection-work-orders?work_date_from=2026-07-01&work_date_to=2026-07-31"
+
+# 按是否逾期筛选
+curl -X GET "http://localhost:8000/inspection-work-orders?is_overdue=true"
+```
+
+### 15. 查看工单详情
+
+```bash
+curl -X GET http://localhost:8000/inspection-work-orders/1
+```
+
+预期结果：包含工单信息、items（所有检查项及填写结果）、associated_alarms（关联报警含快照）、logs（操作日志）。
+
+### 16. 关联已有报警
+
+```bash
+curl -X POST http://localhost:8000/inspection-work-orders/1/alarms \
+  -H "Content-Type: application/json" \
+  -d '{"associated_by": 2, "alarm_id": 1}'
+```
+
+预期结果：返回关联记录，alarm_snapshot 为关联时报警状态的 JSON 快照（含报警详情、确认记录、处理日志），后续报警状态变化不影响快照。
+
+### 17. 解除报警关联
+
+```bash
+curl -X DELETE http://localhost:8000/inspection-work-orders/1/alarms/1
+```
+
+### 18. 导出工单列表 CSV
+
+```bash
+curl -X GET "http://localhost:8000/inspection-work-orders/export.csv" -o inspection_work_orders.csv
+```
+
+### 19. 导出工单列表 JSON
+
+```bash
+curl -X GET "http://localhost:8000/inspection-work-orders/export.json" -o inspection_work_orders.json
+```
+
+预期结果：导出 JSON/CSV 的工单 ID 集合与列表 API `/inspection-work-orders` 完全一致。
+
+### 20. 导出单条工单明细 JSON
+
+```bash
+curl -X GET "http://localhost:8000/inspection-work-orders/1/export.json" -o inspection_wo_1.json
+```
+
+预期结果：导出内容包含 items、associated_alarms、logs，与详情 API `/inspection-work-orders/1` 返回的对应字段一致。
+
+### 21. 失败场景验证
+
+#### 场景 1：observer 不能创建模板（403）
+
+```bash
+curl -X POST http://localhost:8000/inspection-templates \
+  -H "Content-Type: application/json" \
+  -d '{"zone_id": 1, "shift_type": "morning", "name": "observer尝试", "deadline_hours": 4.0, "created_by": 3}'
+```
+
+预期结果：返回 403，提示权限不足。
+
+#### 场景 2：observer 不能领取工单（403）
+
+```bash
+curl -X POST http://localhost:8000/inspection-work-orders/1/claim \
+  -H "Content-Type: application/json" \
+  -d '{"person_id": 3}'
+```
+
+预期结果：返回 403。
+
+#### 场景 3：operator 不能创建模板（403）
+
+```bash
+curl -X POST http://localhost:8000/inspection-templates \
+  -H "Content-Type: application/json" \
+  -d '{"zone_id": 1, "shift_type": "morning", "name": "operator尝试", "deadline_hours": 4.0, "created_by": 2}'
+```
+
+预期结果：返回 403。
+
+#### 场景 4：active 模板不能修改（400）
+
+```bash
+# 先启用模板
+curl -X POST http://localhost:8000/inspection-templates/1/activate \
+  -H "Content-Type: application/json" \
+  -d '{"person_id": 1}'
+
+# 再尝试修改
+curl -X PUT http://localhost:8000/inspection-templates/1 \
+  -H "Content-Type: application/json" \
+  -d '{"name": "尝试修改active模板"}'
+```
+
+预期结果：返回 400，提示模板已启用/停用，不能修改。
+
+#### 场景 5：active 模板不能增删巡检点（400）
+
+```bash
+curl -X POST http://localhost:8000/inspection-templates/1/checkpoints \
+  -H "Content-Type: application/json" \
+  -d '{"name": "尝试新增巡检点"}'
+```
+
+预期结果：返回 400。
+
+#### 场景 6：disabled 模板同样不可修改（400）
+
+```bash
+# 先停用
+curl -X POST http://localhost:8000/inspection-templates/1/disable \
+  -H "Content-Type: application/json" \
+  -d '{"person_id": 1}'
+
+# 再尝试修改
+curl -X PUT http://localhost:8000/inspection-templates/1 \
+  -H "Content-Type: application/json" \
+  -d '{"name": "尝试修改disabled模板"}'
+```
+
+预期结果：返回 400。
+
+#### 场景 7：重复生成同一库区同一班次工单（409）
+
+```bash
+# 第一次生成
+curl -X POST http://localhost:8000/inspection-work-orders/generate \
+  -H "Content-Type: application/json" \
+  -d '{"template_id": 1, "work_date": "2026-07-20", "created_by": 1}'
+
+# 第二次生成（同库区同日期同班次）
+curl -X POST http://localhost:8000/inspection-work-orders/generate \
+  -H "Content-Type: application/json" \
+  -d '{"template_id": 1, "work_date": "2026-07-20", "created_by": 1}'
+```
+
+预期结果：第二次返回 409 Conflict，提示"Duplicate work order for zone + date + shift"。
+
+#### 场景 8：未领取不能完成（400）
+
+```bash
+curl -X POST http://localhost:8000/inspection-work-orders/1/complete \
+  -H "Content-Type: application/json" \
+  -d '{"person_id": 2}'
+```
+
+预期结果：返回 400，提示工单未领取。
+
+#### 场景 9：有 pending 检查项不能完成（400）
+
+```bash
+# 先领取
+curl -X POST http://localhost:8000/inspection-work-orders/1/claim \
+  -H "Content-Type: application/json" \
+  -d '{"person_id": 2}'
+
+# 只填部分检查项（还有 pending）
+curl -X PUT http://localhost:8000/inspection-work-orders/1/items/1 \
+  -H "Content-Type: application/json" \
+  -d '{"person_id": 2, "check_status": "normal"}'
+
+# 尝试完成
+curl -X POST http://localhost:8000/inspection-work-orders/1/complete \
+  -H "Content-Type: application/json" \
+  -d '{"person_id": 2}'
+```
+
+预期结果：返回 400，提示还有未完成的检查项。
+
+#### 场景 10：逾期工单自动标记 overdue
+
+生成一个截止时间在过去的工单（或等待截止时间过去），然后查询：
+
+```bash
+curl -X GET "http://localhost:8000/inspection-work-orders?is_overdue=true"
+```
+
+预期结果：非 completed 且 deadline < 当前时间的工单 is_overdue=true。
+
+#### 场景 11：重启后数据完整保留
+
+```bash
+# 步骤1: 创建模板并启用，生成工单、领取、填写、完成、关联报警
+# （执行上述 1-17 步骤中的若干操作）
+
+# 步骤2: 记录模板、工单、检查项、报警关联、操作日志数据
+
+# 步骤3: 重启服务
+# 停止 uvicorn 后重新启动
+uvicorn main:app --host 0.0.0.0 --port 8000
+
+# 步骤4: 查询验证数据完整
+curl -X GET http://localhost:8000/inspection-templates/1
+curl -X GET http://localhost:8000/inspection-work-orders/1
+```
+
+预期结果：重启后模板状态、工单状态、检查项填写数据、关联报警（含 alarm_snapshot）、操作日志与重启前完全一致。
+
+#### 场景 12：导出与列表 API 数据一致
+
+```bash
+# 获取列表 API 的工单 ID 集合
+curl -X GET "http://localhost:8000/inspection-work-orders"
+
+# 导出 CSV/JSON
+curl -X GET "http://localhost:8000/inspection-work-orders/export.csv" -o wo.csv
+curl -X GET "http://localhost:8000/inspection-work-orders/export.json" -o wo.json
+
+# 获取工单详情 API
+curl -X GET http://localhost:8000/inspection-work-orders/1
+
+# 导出工单明细
+curl -X GET "http://localhost:8000/inspection-work-orders/1/export.json" -o wo_1.json
+```
+
+预期结果：
+- 列表导出（CSV/JSON）的工单 ID 集合与 `/inspection-work-orders` API 完全一致
+- 单条工单导出 JSON 的 items、associated_alarms、logs 字段与 `/inspection-work-orders/1` API 对应字段完全一致
+
+---
+
 ## 项目结构
 
 ```
 .
 ├── main.py                    # 主应用入口，API 路由
-├── models.py                  # SQLAlchemy 数据模型（含静音计划 SuppressionRule / SuppressionHit）
-├── schemas.py                 # Pydantic 请求/响应模式
+├── models.py                  # SQLAlchemy 数据模型（含静音计划、巡检模板/工单等）
+├── schemas.py                 # Pydantic 请求/响应模式（含巡检模块 schema）
 ├── crud.py                    # 基础 CRUD 操作（含静音计划 CRUD）
 ├── alarm_service.py           # 报警核心业务逻辑（含静音命中处理）
 ├── drill_service.py           # 温控策略演练核心逻辑（模拟、CRUD、导出）
+├── inspection_service.py      # 冷库巡检工单核心逻辑（模板、工单、报警关联、导出）
 ├── database.py                # 数据库连接配置
 ├── init_data.py               # 样例数据初始化脚本
 ├── test_alarm_fixes.py        # 复现与回归测试脚本
@@ -1268,6 +1777,8 @@ curl -X GET http://localhost:8000/drills/1/export.json -o drill_1_export.json
 ├── test_shift_checklist.py             # 交接班巡检清单全面测试
 ├── test_shift_checklist_restart.py     # 交接班巡检清单跨重启一致性测试
 ├── test_drill.py              # 温控策略演练综合测试
+├── test_inspection.py         # 冷库巡检工单综合测试（337 项用例）
+├── test_inspection_restart.py # 冷库巡检工单跨重启一致性测试（128 项用例）
 ├── requirements.txt           # Python 依赖
 ├── examples/                  # 样例数据
 │   ├── readings_sample.json

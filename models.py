@@ -382,3 +382,143 @@ class ShiftChecklistManualItem(Base):
     checklist = relationship("ShiftChecklist", back_populates="manual_items")
     checker = relationship("Person", foreign_keys=[checked_by])
     handler = relationship("Person", foreign_keys=[handler_id])
+
+
+class InspectionTemplateStatus(str, enum.Enum):
+    DRAFT = "draft"
+    ACTIVE = "active"
+    DISABLED = "disabled"
+
+
+class InspectionWorkOrderStatus(str, enum.Enum):
+    PENDING = "pending"
+    CLAIMED = "claimed"
+    COMPLETED = "completed"
+
+
+class InspectionTemplate(Base):
+    __tablename__ = "inspection_templates"
+
+    id = Column(Integer, primary_key=True, index=True)
+    zone_id = Column(Integer, ForeignKey("zones.id"), nullable=False, index=True)
+    shift_type = Column(Enum(ShiftEnum), nullable=False, index=True)
+    name = Column(String(200), nullable=False)
+    description = Column(String(500), nullable=True)
+    deadline_hours = Column(Float, nullable=False, default=8.0)
+    status = Column(Enum(InspectionTemplateStatus), nullable=False, default=InspectionTemplateStatus.DRAFT)
+    created_by = Column(Integer, ForeignKey("persons.id"), nullable=False)
+    activated_by = Column(Integer, ForeignKey("persons.id"), nullable=True)
+    activated_at = Column(DateTime(timezone=True), nullable=True)
+    disabled_by = Column(Integer, ForeignKey("persons.id"), nullable=True)
+    disabled_at = Column(DateTime(timezone=True), nullable=True)
+    created_at = Column(DateTime(timezone=True), server_default=func.now())
+    updated_at = Column(DateTime(timezone=True), server_default=func.now(), onupdate=func.now())
+
+    zone = relationship("Zone", foreign_keys=[zone_id])
+    creator = relationship("Person", foreign_keys=[created_by])
+    activator = relationship("Person", foreign_keys=[activated_by])
+    disabler = relationship("Person", foreign_keys=[disabled_by])
+    checkpoints = relationship("InspectionCheckpoint", back_populates="template", cascade="all, delete-orphan")
+    work_orders = relationship("InspectionWorkOrder", back_populates="template")
+
+
+class InspectionCheckpoint(Base):
+    __tablename__ = "inspection_checkpoints"
+
+    id = Column(Integer, primary_key=True, index=True)
+    template_id = Column(Integer, ForeignKey("inspection_templates.id"), nullable=False, index=True)
+    name = Column(String(200), nullable=False)
+    description = Column(String(500), nullable=True)
+    sort_order = Column(Integer, nullable=False, default=0)
+    require_photo = Column(Boolean, default=False)
+    require_temperature = Column(Boolean, default=False)
+    created_at = Column(DateTime(timezone=True), server_default=func.now())
+    updated_at = Column(DateTime(timezone=True), server_default=func.now(), onupdate=func.now())
+
+    template = relationship("InspectionTemplate", back_populates="checkpoints")
+
+
+class InspectionWorkOrder(Base):
+    __tablename__ = "inspection_work_orders"
+
+    id = Column(Integer, primary_key=True, index=True)
+    template_id = Column(Integer, ForeignKey("inspection_templates.id"), nullable=False, index=True)
+    zone_id = Column(Integer, ForeignKey("zones.id"), nullable=False, index=True)
+    shift_type = Column(Enum(ShiftEnum), nullable=False, index=True)
+    work_date = Column(Date, nullable=False, index=True)
+    deadline = Column(DateTime(timezone=True), nullable=False)
+    status = Column(Enum(InspectionWorkOrderStatus), nullable=False, default=InspectionWorkOrderStatus.PENDING, index=True)
+    claimed_by = Column(Integer, ForeignKey("persons.id"), nullable=True)
+    claimed_at = Column(DateTime(timezone=True), nullable=True)
+    completed_by = Column(Integer, ForeignKey("persons.id"), nullable=True)
+    completed_at = Column(DateTime(timezone=True), nullable=True)
+    general_remark = Column(Text, nullable=True)
+    created_by = Column(Integer, ForeignKey("persons.id"), nullable=False)
+    created_at = Column(DateTime(timezone=True), server_default=func.now())
+    updated_at = Column(DateTime(timezone=True), server_default=func.now(), onupdate=func.now())
+
+    template = relationship("InspectionTemplate", back_populates="work_orders")
+    zone = relationship("Zone", foreign_keys=[zone_id])
+    claimer = relationship("Person", foreign_keys=[claimed_by])
+    completer = relationship("Person", foreign_keys=[completed_by])
+    creator = relationship("Person", foreign_keys=[created_by])
+    items = relationship("InspectionWorkOrderItem", back_populates="work_order", cascade="all, delete-orphan")
+    alarm_associations = relationship("InspectionWorkOrderAlarm", back_populates="work_order", cascade="all, delete-orphan")
+    operation_logs = relationship("InspectionWorkOrderLog", back_populates="work_order", cascade="all, delete-orphan")
+
+
+class InspectionWorkOrderItem(Base):
+    __tablename__ = "inspection_work_order_items"
+
+    id = Column(Integer, primary_key=True, index=True)
+    work_order_id = Column(Integer, ForeignKey("inspection_work_orders.id"), nullable=False, index=True)
+    checkpoint_id = Column(Integer, ForeignKey("inspection_checkpoints.id"), nullable=False)
+    checkpoint_name = Column(String(200), nullable=False)
+    checkpoint_description = Column(String(500), nullable=True)
+    sort_order = Column(Integer, nullable=False, default=0)
+    require_photo = Column(Boolean, default=False)
+    require_temperature = Column(Boolean, default=False)
+    temperature_value = Column(Float, nullable=True)
+    photo_urls = Column(Text, nullable=True)
+    check_status = Column(Enum(CheckItemStatus), nullable=False, default=CheckItemStatus.PENDING)
+    checked_by = Column(Integer, ForeignKey("persons.id"), nullable=True)
+    checked_at = Column(DateTime(timezone=True), nullable=True)
+    remark = Column(Text, nullable=True)
+    exception_action = Column(Text, nullable=True)
+    handler_id = Column(Integer, ForeignKey("persons.id"), nullable=True)
+    created_at = Column(DateTime(timezone=True), server_default=func.now())
+    updated_at = Column(DateTime(timezone=True), server_default=func.now(), onupdate=func.now())
+
+    work_order = relationship("InspectionWorkOrder", back_populates="items")
+    checkpoint = relationship("InspectionCheckpoint", foreign_keys=[checkpoint_id])
+    checker = relationship("Person", foreign_keys=[checked_by])
+    handler = relationship("Person", foreign_keys=[handler_id])
+
+
+class InspectionWorkOrderAlarm(Base):
+    __tablename__ = "inspection_work_order_alarms"
+
+    id = Column(Integer, primary_key=True, index=True)
+    work_order_id = Column(Integer, ForeignKey("inspection_work_orders.id"), nullable=False, index=True)
+    alarm_id = Column(Integer, ForeignKey("alarms.id"), nullable=False, index=True)
+    alarm_snapshot = Column(Text, nullable=True)
+    associated_by = Column(Integer, ForeignKey("persons.id"), nullable=False)
+    created_at = Column(DateTime(timezone=True), server_default=func.now())
+
+    work_order = relationship("InspectionWorkOrder", back_populates="alarm_associations")
+    alarm = relationship("Alarm", foreign_keys=[alarm_id])
+    associator = relationship("Person", foreign_keys=[associated_by])
+
+
+class InspectionWorkOrderLog(Base):
+    __tablename__ = "inspection_work_order_logs"
+
+    id = Column(Integer, primary_key=True, index=True)
+    work_order_id = Column(Integer, ForeignKey("inspection_work_orders.id"), nullable=False, index=True)
+    action = Column(String(50), nullable=False)
+    operator_id = Column(Integer, ForeignKey("persons.id"), nullable=False)
+    detail = Column(Text, nullable=True)
+    created_at = Column(DateTime(timezone=True), server_default=func.now())
+
+    work_order = relationship("InspectionWorkOrder", back_populates="operation_logs")
+    operator = relationship("Person", foreign_keys=[operator_id])

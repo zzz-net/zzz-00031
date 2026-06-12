@@ -13,6 +13,7 @@ import schemas
 import crud
 import alarm_service
 import drill_service
+import inspection_service
 
 Base.metadata.create_all(bind=engine)
 
@@ -1199,3 +1200,469 @@ def export_drill_json(drill_id: int, db: Session = Depends(get_db)):
         media_type="application/json",
         headers={"Content-Disposition": f"attachment; filename=drill_{drill_id}_export.json"}
     )
+
+
+# ========== Inspection Work Order APIs ==========
+
+def _can_manage_inspection_template(person: models.Person) -> bool:
+    return person.role == models.RoleEnum.ADMIN
+
+
+def _can_operate_work_order(person: models.Person) -> bool:
+    return person.role in [models.RoleEnum.ADMIN, models.RoleEnum.OPERATOR]
+
+
+def _can_view_inspection(person: models.Person) -> bool:
+    return person.role in [models.RoleEnum.ADMIN, models.RoleEnum.OPERATOR, models.RoleEnum.OBSERVER]
+
+
+# --- Inspection Templates ---
+
+@app.post("/inspection-templates", response_model=schemas.InspectionTemplateDetail, tags=["Inspection Templates"])
+def create_inspection_template(template: schemas.InspectionTemplateCreate, db: Session = Depends(get_db)):
+    db_template, error = inspection_service.create_template(db, template)
+    if error:
+        if "Permission denied" in error:
+            raise HTTPException(status_code=403, detail=error)
+        if "not found" in error:
+            raise HTTPException(status_code=400, detail=error)
+        raise HTTPException(status_code=400, detail=error)
+    return inspection_service.build_template_detail(db, db_template)
+
+
+@app.get("/inspection-templates", response_model=List[schemas.InspectionTemplateListItem], tags=["Inspection Templates"])
+def list_inspection_templates(
+    zone_id: Optional[int] = None,
+    status: Optional[schemas.InspectionTemplateStatus] = None,
+    shift_type: Optional[schemas.ShiftEnum] = None,
+    skip: int = 0,
+    limit: int = 100,
+    db: Session = Depends(get_db)
+):
+    status_model = None
+    if status:
+        status_model = models.InspectionTemplateStatus(status.value)
+    shift_model = None
+    if shift_type:
+        shift_model = models.ShiftEnum(shift_type.value)
+    templates = inspection_service.list_templates(
+        db, zone_id=zone_id, status=status_model, shift_type=shift_model, skip=skip, limit=limit
+    )
+    return [inspection_service.build_template_list_item(db, t) for t in templates]
+
+
+@app.get("/inspection-templates/{template_id}", response_model=schemas.InspectionTemplateDetail, tags=["Inspection Templates"])
+def get_inspection_template(template_id: int, db: Session = Depends(get_db)):
+    template = inspection_service.get_template(db, template_id)
+    if not template:
+        raise HTTPException(status_code=404, detail="Inspection template not found")
+    return inspection_service.build_template_detail(db, template)
+
+
+@app.put("/inspection-templates/{template_id}", response_model=schemas.InspectionTemplateDetail, tags=["Inspection Templates"])
+def update_inspection_template(
+    template_id: int,
+    update: schemas.InspectionTemplateUpdate,
+    db: Session = Depends(get_db)
+):
+    template, error = inspection_service.update_template(db, template_id, update)
+    if error:
+        if "not found" in error:
+            raise HTTPException(status_code=404, detail=error)
+        if "immutable" in error:
+            raise HTTPException(status_code=400, detail=error)
+        raise HTTPException(status_code=400, detail=error)
+    return inspection_service.build_template_detail(db, template)
+
+
+@app.post("/inspection-templates/{template_id}/activate", response_model=schemas.InspectionTemplateDetail, tags=["Inspection Templates"])
+def activate_inspection_template(
+    template_id: int,
+    body: schemas.InspectionTemplateActivate,
+    db: Session = Depends(get_db)
+):
+    template, error = inspection_service.activate_template(db, template_id, body.person_id)
+    if error:
+        if "Permission denied" in error:
+            raise HTTPException(status_code=403, detail=error)
+        if "not found" in error:
+            raise HTTPException(status_code=404, detail=error)
+        if "Cannot activate" in error:
+            raise HTTPException(status_code=400, detail=error)
+        raise HTTPException(status_code=400, detail=error)
+    return inspection_service.build_template_detail(db, template)
+
+
+@app.post("/inspection-templates/{template_id}/disable", response_model=schemas.InspectionTemplateDetail, tags=["Inspection Templates"])
+def disable_inspection_template(
+    template_id: int,
+    body: schemas.InspectionTemplateDisable,
+    db: Session = Depends(get_db)
+):
+    template, error = inspection_service.disable_template(db, template_id, body.person_id)
+    if error:
+        if "Permission denied" in error:
+            raise HTTPException(status_code=403, detail=error)
+        if "not found" in error:
+            raise HTTPException(status_code=404, detail=error)
+        if "Cannot disable" in error:
+            raise HTTPException(status_code=400, detail=error)
+        raise HTTPException(status_code=400, detail=error)
+    return inspection_service.build_template_detail(db, template)
+
+
+@app.post("/inspection-templates/{template_id}/checkpoints", response_model=schemas.InspectionCheckpoint, tags=["Inspection Templates"])
+def add_inspection_checkpoint(
+    template_id: int,
+    checkpoint: schemas.InspectionCheckpointCreate,
+    db: Session = Depends(get_db)
+):
+    cp, error = inspection_service.add_checkpoint(db, template_id, checkpoint)
+    if error:
+        if "not found" in error:
+            raise HTTPException(status_code=404, detail=error)
+        if "immutable" in error:
+            raise HTTPException(status_code=400, detail=error)
+        raise HTTPException(status_code=400, detail=error)
+    return cp
+
+
+@app.put("/inspection-templates/{template_id}/checkpoints/{checkpoint_id}", response_model=schemas.InspectionCheckpoint, tags=["Inspection Templates"])
+def update_inspection_checkpoint(
+    template_id: int,
+    checkpoint_id: int,
+    update: schemas.InspectionCheckpointUpdate,
+    db: Session = Depends(get_db)
+):
+    cp, error = inspection_service.update_checkpoint(db, template_id, checkpoint_id, update)
+    if error:
+        if "not found" in error:
+            raise HTTPException(status_code=404, detail=error)
+        if "immutable" in error:
+            raise HTTPException(status_code=400, detail=error)
+        raise HTTPException(status_code=400, detail=error)
+    return cp
+
+
+@app.delete("/inspection-templates/{template_id}/checkpoints/{checkpoint_id}", tags=["Inspection Templates"])
+def delete_inspection_checkpoint(
+    template_id: int,
+    checkpoint_id: int,
+    db: Session = Depends(get_db)
+):
+    success, error = inspection_service.delete_checkpoint(db, template_id, checkpoint_id)
+    if error:
+        if "not found" in error:
+            raise HTTPException(status_code=404, detail=error)
+        if "immutable" in error:
+            raise HTTPException(status_code=400, detail=error)
+        raise HTTPException(status_code=400, detail=error)
+    return {"success": True}
+
+
+# --- Inspection Work Orders ---
+
+@app.post("/inspection-work-orders/generate", response_model=schemas.InspectionWorkOrderDetail, tags=["Inspection Work Orders"])
+def generate_inspection_work_order(
+    generate: schemas.InspectionWorkOrderGenerate,
+    db: Session = Depends(get_db)
+):
+    order, error = inspection_service.generate_work_order(db, generate)
+    if error:
+        if "Permission denied" in error:
+            raise HTTPException(status_code=403, detail=error)
+        if "not found" in error:
+            raise HTTPException(status_code=404, detail=error)
+        if "Conflict" in error:
+            raise HTTPException(status_code=409, detail=error)
+        raise HTTPException(status_code=400, detail=error)
+    return inspection_service.build_work_order_detail(db, order)
+
+
+@app.get("/inspection-work-orders", response_model=List[schemas.InspectionWorkOrderListItem], tags=["Inspection Work Orders"])
+def list_inspection_work_orders(
+    zone_id: Optional[int] = None,
+    status: Optional[schemas.InspectionWorkOrderStatus] = None,
+    claimed_by: Optional[int] = None,
+    shift_type: Optional[schemas.ShiftEnum] = None,
+    work_date_from: Optional[date] = None,
+    work_date_to: Optional[date] = None,
+    is_overdue: Optional[bool] = None,
+    skip: int = 0,
+    limit: int = 100,
+    db: Session = Depends(get_db)
+):
+    status_model = None
+    if status:
+        status_model = models.InspectionWorkOrderStatus(status.value)
+    shift_model = None
+    if shift_type:
+        shift_model = models.ShiftEnum(shift_type.value)
+    orders = inspection_service.list_work_orders(
+        db, zone_id=zone_id, status=status_model, claimed_by=claimed_by,
+        shift_type=shift_model, work_date_from=work_date_from, work_date_to=work_date_to,
+        is_overdue=is_overdue, skip=skip, limit=limit
+    )
+    return [inspection_service.build_work_order_list_item(db, o) for o in orders]
+
+
+@app.get("/inspection-work-orders/export.csv", tags=["Inspection Work Orders"])
+def export_inspection_work_orders_csv(
+    zone_id: Optional[int] = None,
+    status: Optional[schemas.InspectionWorkOrderStatus] = None,
+    claimed_by: Optional[int] = None,
+    shift_type: Optional[schemas.ShiftEnum] = None,
+    work_date_from: Optional[date] = None,
+    work_date_to: Optional[date] = None,
+    is_overdue: Optional[bool] = None,
+    db: Session = Depends(get_db)
+):
+    status_model = None
+    if status:
+        status_model = models.InspectionWorkOrderStatus(status.value)
+    shift_model = None
+    if shift_type:
+        shift_model = models.ShiftEnum(shift_type.value)
+    orders = inspection_service.list_work_orders(
+        db, zone_id=zone_id, status=status_model, claimed_by=claimed_by,
+        shift_type=shift_model, work_date_from=work_date_from, work_date_to=work_date_to,
+        is_overdue=is_overdue, limit=10000
+    )
+
+    output = io.StringIO()
+    writer = csv.writer(output)
+    writer.writerow([
+        'id', 'template_id', 'zone_id', 'zone_name', 'shift_type', 'work_date',
+        'deadline', 'status', 'is_overdue', 'claimed_by', 'claimer_name',
+        'claimed_at', 'completed_by', 'completer_name', 'completed_at',
+        'general_remark', 'created_by', 'creator_name', 'item_count',
+        'pending_count', 'abnormal_count', 'alarm_count', 'created_at', 'updated_at'
+    ])
+
+    for order in orders:
+        detail = inspection_service.build_work_order_list_item(db, order)
+        status_val = detail['status'].value if hasattr(detail['status'], 'value') else str(detail['status'])
+        shift_val = detail['shift_type'].value if hasattr(detail['shift_type'], 'value') else str(detail['shift_type'])
+        writer.writerow([
+            detail['id'],
+            detail['template_id'],
+            detail['zone_id'],
+            detail['zone_name'] or '',
+            shift_val,
+            detail['work_date'],
+            detail['deadline'].isoformat() if detail['deadline'] else '',
+            status_val,
+            detail['is_overdue'],
+            detail['claimed_by'] or '',
+            detail['claimer_name'] or '',
+            detail['claimed_at'].isoformat() if detail['claimed_at'] else '',
+            detail['completed_by'] or '',
+            detail['completer_name'] or '',
+            detail['completed_at'].isoformat() if detail['completed_at'] else '',
+            detail['general_remark'] or '',
+            detail['created_by'],
+            detail['creator_name'] or '',
+            detail['item_count'],
+            detail['pending_count'],
+            detail['abnormal_count'],
+            detail['alarm_count'],
+            detail['created_at'].isoformat() if detail['created_at'] else '',
+            detail['updated_at'].isoformat() if detail['updated_at'] else '',
+        ])
+
+    output.seek(0)
+    return StreamingResponse(
+        io.BytesIO(output.getvalue().encode('utf-8')),
+        media_type="text/csv",
+        headers={"Content-Disposition": "attachment; filename=inspection_work_orders.csv"}
+    )
+
+
+@app.get("/inspection-work-orders/export.json", tags=["Inspection Work Orders"])
+def export_inspection_work_orders_json(
+    zone_id: Optional[int] = None,
+    status: Optional[schemas.InspectionWorkOrderStatus] = None,
+    claimed_by: Optional[int] = None,
+    shift_type: Optional[schemas.ShiftEnum] = None,
+    work_date_from: Optional[date] = None,
+    work_date_to: Optional[date] = None,
+    is_overdue: Optional[bool] = None,
+    db: Session = Depends(get_db)
+):
+    status_model = None
+    if status:
+        status_model = models.InspectionWorkOrderStatus(status.value)
+    shift_model = None
+    if shift_type:
+        shift_model = models.ShiftEnum(shift_type.value)
+    orders = inspection_service.list_work_orders(
+        db, zone_id=zone_id, status=status_model, claimed_by=claimed_by,
+        shift_type=shift_model, work_date_from=work_date_from, work_date_to=work_date_to,
+        is_overdue=is_overdue, limit=10000
+    )
+
+    result = [inspection_service.build_work_order_list_item(db, o) for o in orders]
+    json_str = json.dumps(result, default=str, ensure_ascii=False, indent=2)
+
+    return StreamingResponse(
+        io.BytesIO(json_str.encode('utf-8')),
+        media_type="application/json",
+        headers={"Content-Disposition": "attachment; filename=inspection_work_orders.json"}
+    )
+
+
+@app.get("/inspection-work-orders/{work_order_id}", response_model=schemas.InspectionWorkOrderDetail, tags=["Inspection Work Orders"])
+def get_inspection_work_order(work_order_id: int, db: Session = Depends(get_db)):
+    order = inspection_service.get_work_order(db, work_order_id)
+    if not order:
+        raise HTTPException(status_code=404, detail="Inspection work order not found")
+    return inspection_service.build_work_order_detail(db, order)
+
+
+@app.get("/inspection-work-orders/{work_order_id}/export.json", tags=["Inspection Work Orders"])
+def export_inspection_work_order_detail_json(work_order_id: int, db: Session = Depends(get_db)):
+    order = inspection_service.get_work_order(db, work_order_id)
+    if not order:
+        raise HTTPException(status_code=404, detail="Inspection work order not found")
+
+    export_data = inspection_service.build_work_order_export(db, order)
+    json_str = json.dumps(export_data, default=str, ensure_ascii=False, indent=2)
+
+    return StreamingResponse(
+        io.BytesIO(json_str.encode('utf-8')),
+        media_type="application/json",
+        headers={"Content-Disposition": f"attachment; filename=inspection_work_order_{work_order_id}_export.json"}
+    )
+
+
+@app.post("/inspection-work-orders/{work_order_id}/claim", response_model=schemas.InspectionWorkOrderDetail, tags=["Inspection Work Orders"])
+def claim_inspection_work_order(
+    work_order_id: int,
+    body: schemas.InspectionWorkOrderClaim,
+    db: Session = Depends(get_db)
+):
+    order, error = inspection_service.claim_work_order(db, work_order_id, body.person_id)
+    if error:
+        if "Permission denied" in error:
+            raise HTTPException(status_code=403, detail=error)
+        if "not found" in error:
+            raise HTTPException(status_code=404, detail=error)
+        if "Cannot claim" in error:
+            raise HTTPException(status_code=400, detail=error)
+        raise HTTPException(status_code=400, detail=error)
+    return inspection_service.build_work_order_detail(db, order)
+
+
+@app.post("/inspection-work-orders/{work_order_id}/complete", response_model=schemas.InspectionWorkOrderDetail, tags=["Inspection Work Orders"])
+def complete_inspection_work_order(
+    work_order_id: int,
+    body: schemas.InspectionWorkOrderComplete,
+    db: Session = Depends(get_db)
+):
+    order, error = inspection_service.complete_work_order(db, work_order_id, body)
+    if error:
+        if "Permission denied" in error:
+            raise HTTPException(status_code=403, detail=error)
+        if "not found" in error:
+            raise HTTPException(status_code=404, detail=error)
+        if "Cannot complete" in error:
+            raise HTTPException(status_code=400, detail=error)
+        raise HTTPException(status_code=400, detail=error)
+    return inspection_service.build_work_order_detail(db, order)
+
+
+@app.put("/inspection-work-orders/{work_order_id}/items/{item_id}", response_model=schemas.InspectionWorkOrderItemBase, tags=["Inspection Work Orders"])
+def update_inspection_work_order_item(
+    work_order_id: int,
+    item_id: int,
+    update: schemas.InspectionWorkOrderItemUpdate,
+    db: Session = Depends(get_db)
+):
+    item, error = inspection_service.update_work_order_item(db, work_order_id, item_id, update)
+    if error:
+        if "Permission denied" in error:
+            raise HTTPException(status_code=403, detail=error)
+        if "not found" in error:
+            raise HTTPException(status_code=404, detail=error)
+        if "Cannot modify" in error:
+            raise HTTPException(status_code=400, detail=error)
+        raise HTTPException(status_code=400, detail=error)
+    checker = item.checker
+    handler = item.handler
+    try:
+        photo_urls_parsed = json.loads(item.photo_urls) if item.photo_urls else []
+    except (json.JSONDecodeError, TypeError):
+        photo_urls_parsed = item.photo_urls if item.photo_urls else []
+    return {
+        "id": item.id,
+        "work_order_id": item.work_order_id,
+        "checkpoint_id": item.checkpoint_id,
+        "checkpoint_name": item.checkpoint_name,
+        "checkpoint_description": item.checkpoint_description,
+        "sort_order": item.sort_order,
+        "require_photo": item.require_photo,
+        "require_temperature": item.require_temperature,
+        "temperature_value": item.temperature_value,
+        "photo_urls": photo_urls_parsed,
+        "check_status": item.check_status,
+        "checked_by": item.checked_by,
+        "checked_by_name": checker.name if checker else None,
+        "checked_at": item.checked_at,
+        "remark": item.remark,
+        "exception_action": item.exception_action,
+        "handler_id": item.handler_id,
+        "handler_name": handler.name if handler else None,
+        "created_at": item.created_at,
+        "updated_at": item.updated_at,
+    }
+
+
+# --- Inspection Work Order Alarm Associations ---
+
+@app.post("/inspection-work-orders/{work_order_id}/alarms", response_model=schemas.InspectionWorkOrderAlarmBase, tags=["Inspection Work Orders"])
+def associate_inspection_alarm(
+    work_order_id: int,
+    body: schemas.InspectionAlarmAssociate,
+    db: Session = Depends(get_db)
+):
+    assoc, error = inspection_service.associate_alarm(db, work_order_id, body)
+    if error:
+        if "Permission denied" in error:
+            raise HTTPException(status_code=403, detail=error)
+        if "not found" in error:
+            raise HTTPException(status_code=404, detail=error)
+        if "already associated" in error:
+            raise HTTPException(status_code=409, detail=error)
+        raise HTTPException(status_code=400, detail=error)
+    associator = assoc.associator
+    try:
+        snapshot = json.loads(assoc.alarm_snapshot) if assoc.alarm_snapshot else None
+    except (json.JSONDecodeError, TypeError):
+        snapshot = assoc.alarm_snapshot
+    return {
+        "id": assoc.id,
+        "work_order_id": assoc.work_order_id,
+        "alarm_id": assoc.alarm_id,
+        "alarm_snapshot": snapshot,
+        "associated_by": assoc.associated_by,
+        "associator_name": associator.name if associator else None,
+        "created_at": assoc.created_at,
+    }
+
+
+@app.delete("/inspection-work-orders/{work_order_id}/alarms/{alarm_id}", tags=["Inspection Work Orders"])
+def disassociate_inspection_alarm(
+    work_order_id: int,
+    alarm_id: int,
+    person_id: int,
+    db: Session = Depends(get_db)
+):
+    success, error = inspection_service.disassociate_alarm(db, work_order_id, alarm_id, person_id)
+    if error:
+        if "Permission denied" in error:
+            raise HTTPException(status_code=403, detail=error)
+        if "not found" in error:
+            raise HTTPException(status_code=404, detail=error)
+        raise HTTPException(status_code=400, detail=error)
+    return {"success": True}
+

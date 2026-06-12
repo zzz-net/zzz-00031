@@ -1,6 +1,6 @@
 from pydantic import BaseModel, Field
 from datetime import datetime, date
-from typing import Optional, List
+from typing import Optional, List, Any
 from enum import Enum
 
 
@@ -537,3 +537,236 @@ class ShiftChecklistDetail(ShiftChecklistBase):
 
     class Config:
         from_attributes = True
+
+
+class InspectionTemplateStatus(str, Enum):
+    DRAFT = "draft"
+    ACTIVE = "active"
+    DISABLED = "disabled"
+
+
+class InspectionWorkOrderStatus(str, Enum):
+    PENDING = "pending"
+    CLAIMED = "claimed"
+    COMPLETED = "completed"
+
+
+class InspectionCheckpointCreate(BaseModel):
+    name: str
+    description: Optional[str] = None
+    sort_order: int = 0
+    require_photo: bool = False
+    require_temperature: bool = False
+
+
+class InspectionCheckpointUpdate(BaseModel):
+    name: Optional[str] = None
+    description: Optional[str] = None
+    sort_order: Optional[int] = None
+    require_photo: Optional[bool] = None
+    require_temperature: Optional[bool] = None
+
+
+class InspectionCheckpoint(BaseModel):
+    id: int
+    template_id: int
+    name: str
+    description: Optional[str] = None
+    sort_order: int
+    require_photo: bool
+    require_temperature: bool
+    created_at: datetime
+    updated_at: datetime
+
+    class Config:
+        from_attributes = True
+
+
+class InspectionTemplateCreate(BaseModel):
+    zone_id: int
+    shift_type: ShiftEnum
+    name: str
+    description: Optional[str] = None
+    deadline_hours: float = 8.0
+    created_by: int
+    checkpoints: List[InspectionCheckpointCreate] = []
+
+
+class InspectionTemplateUpdate(BaseModel):
+    name: Optional[str] = None
+    description: Optional[str] = None
+    deadline_hours: Optional[float] = None
+
+
+class InspectionTemplateActivate(BaseModel):
+    person_id: int
+
+
+class InspectionTemplateDisable(BaseModel):
+    person_id: int
+
+
+class InspectionTemplateBase(BaseModel):
+    id: int
+    zone_id: int
+    zone_name: Optional[str] = None
+    shift_type: ShiftEnum
+    name: str
+    description: Optional[str] = None
+    deadline_hours: float
+    status: InspectionTemplateStatus
+    created_by: int
+    creator_name: Optional[str] = None
+    creator_role: Optional[RoleEnum] = None
+    activated_by: Optional[int] = None
+    activator_name: Optional[str] = None
+    activated_at: Optional[datetime] = None
+    disabled_by: Optional[int] = None
+    disabler_name: Optional[str] = None
+    disabled_at: Optional[datetime] = None
+    created_at: datetime
+    updated_at: datetime
+
+
+class InspectionTemplateListItem(InspectionTemplateBase):
+    checkpoint_count: int = 0
+    work_order_count: int = 0
+
+    class Config:
+        from_attributes = True
+
+
+class InspectionTemplateDetail(InspectionTemplateBase):
+    checkpoints: List[InspectionCheckpoint] = []
+
+    class Config:
+        from_attributes = True
+
+
+class InspectionWorkOrderGenerate(BaseModel):
+    template_id: int
+    work_date: date
+    created_by: int
+
+
+class InspectionWorkOrderClaim(BaseModel):
+    person_id: int
+
+
+class InspectionWorkOrderComplete(BaseModel):
+    person_id: int
+    general_remark: Optional[str] = None
+
+
+class InspectionWorkOrderItemUpdate(BaseModel):
+    person_id: int
+    check_status: CheckItemStatus
+    temperature_value: Optional[float] = None
+    photo_urls: Optional[List[str]] = None
+    remark: Optional[str] = None
+    exception_action: Optional[str] = None
+    handler_id: Optional[int] = None
+
+
+class InspectionWorkOrderItemBase(BaseModel):
+    id: int
+    work_order_id: int
+    checkpoint_id: int
+    checkpoint_name: str
+    checkpoint_description: Optional[str] = None
+    sort_order: int
+    require_photo: bool
+    require_temperature: bool
+    temperature_value: Optional[float] = None
+    photo_urls: Optional[List[str]] = None
+    check_status: CheckItemStatus
+    checked_by: Optional[int] = None
+    checked_by_name: Optional[str] = None
+    checked_at: Optional[datetime] = None
+    remark: Optional[str] = None
+    exception_action: Optional[str] = None
+    handler_id: Optional[int] = None
+    handler_name: Optional[str] = None
+    created_at: datetime
+    updated_at: datetime
+
+    class Config:
+        from_attributes = True
+
+
+class InspectionWorkOrderAlarmBase(BaseModel):
+    id: int
+    work_order_id: int
+    alarm_id: int
+    alarm_snapshot: Optional[Any] = None
+    associated_by: int
+    associator_name: Optional[str] = None
+    created_at: datetime
+
+    class Config:
+        from_attributes = True
+
+
+class InspectionWorkOrderAlarmDetail(InspectionWorkOrderAlarmBase):
+    alarm_detail: Optional[dict] = None
+
+
+class InspectionWorkOrderLog(BaseModel):
+    id: int
+    work_order_id: int
+    action: str
+    operator_id: int
+    operator_name: Optional[str] = None
+    operator_role: Optional[RoleEnum] = None
+    detail: Optional[str] = None
+    created_at: datetime
+
+    class Config:
+        from_attributes = True
+
+
+class InspectionWorkOrderBase(BaseModel):
+    id: int
+    template_id: int
+    zone_id: int
+    zone_name: Optional[str] = None
+    shift_type: ShiftEnum
+    work_date: date
+    deadline: datetime
+    status: InspectionWorkOrderStatus
+    is_overdue: bool = False
+    claimed_by: Optional[int] = None
+    claimer_name: Optional[str] = None
+    claimed_at: Optional[datetime] = None
+    completed_by: Optional[int] = None
+    completer_name: Optional[str] = None
+    completed_at: Optional[datetime] = None
+    general_remark: Optional[str] = None
+    created_by: int
+    creator_name: Optional[str] = None
+    created_at: datetime
+    updated_at: datetime
+
+
+class InspectionWorkOrderListItem(InspectionWorkOrderBase):
+    item_count: int = 0
+    pending_count: int = 0
+    abnormal_count: int = 0
+    alarm_count: int = 0
+
+    class Config:
+        from_attributes = True
+
+
+class InspectionWorkOrderDetail(InspectionWorkOrderBase):
+    items: List[InspectionWorkOrderItemBase] = []
+    associated_alarms: List[InspectionWorkOrderAlarmBase] = []
+    logs: List[InspectionWorkOrderLog] = []
+
+    class Config:
+        from_attributes = True
+
+
+class InspectionAlarmAssociate(BaseModel):
+    associated_by: int
+    alarm_id: int

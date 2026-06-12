@@ -65,9 +65,10 @@ uvicorn main:app --reload --host 0.0.0.0 --port 8000
 
 1. **乱序保护**: 同一传感器的乱序读数（reading_time 早于已入库读数的最新时间）在写入前被拒绝，不入库，计入 failed 和 errors 列表
 2. **去重窗口**: 在去重窗口内，连续高温/低温只更新同一个报警
-3. **权限控制**: 观察者(observer)不能确认、关闭或升级报警
+3. **权限控制**: 观察者(observer)不能确认、关闭或升级报警，也不能管理抑制规则
 4. **关闭说明**: 关闭报警必须提供处理说明，缺少时返回 HTTP 400
 5. **离线检测**: 当一条读数的 reading_time 距该传感器上一条读数超过 `offline_timeout_minutes`（默认30分钟）时，自动产生一条 `offline` 类型报警，触发时间为上次读数时间 + 超时阈值
+6. **抑制规则**: 只能通过 `/suppression-rules` 创建规则化抑制，禁止直接把报警改成 suppressed。抑制期间读数正常入库，报警状态为 suppressed，关联规则ID并生成命中日志。
 
 ## API 示例 (curl)
 
@@ -231,15 +232,7 @@ curl -X POST http://localhost:8000/alarms/1/escalate \
   -d '{"person_id": 2, "note": "设备故障严重，需联系维修"}'
 ```
 
-#### 4. 抑制报警（临时屏蔽）
-
-```bash
-curl -X POST http://localhost:8000/alarms/1/suppress \
-  -H "Content-Type: application/json" \
-  -d '{"person_id": 1, "note": "已知设备检修，临时屏蔽1小时", "suppress_minutes": 60}'
-```
-
-#### 5. 关闭报警（需处理说明）
+#### 4. 关闭报警（需处理说明）
 
 ```bash
 curl -X POST http://localhost:8000/alarms/1/close \
@@ -354,9 +347,146 @@ curl -X POST http://localhost:8000/readings/import \
 
 ---
 
+### 八、报警抑制规则
+
+值班人员可给指定传感器或库区设置临时抑制窗口。窗口内读数仍正常入库，但符合抑制条件的报警不会变成 `open`，而是标记为 `suppressed`，同时生成命中日志（suppression_hits）记录触发值、时间和命中规则。
+
+#### 抑制规则属性
+
+| 属性 | 类型 | 必填 | 说明 |
+|------|------|------|------|
+| `sensor_id` | int | 否 | 按传感器抑制（与 zone_id 二选一或同时） |
+| `zone_id` | int | 否 | 按库区抑制（与 sensor_id 二选一或同时） |
+| `alarm_type` | str | 否 | 按报警类型抑制：`over_temp` / `under_temp` / `offline`，留空表示全部 |
+| `start_time` | datetime | 是 | 抑制窗口开始时间 |
+| `end_time` | datetime | 是 | 抑制窗口结束时间，必须晚于 start_time |
+| `reason` | str | 是 | 抑制原因，如"设备检修"、"库区维护" |
+| `created_by` | int | 是 | 创建人 ID（必须是 admin 或 operator） |
+
+#### 约束条件
+
+- **禁止时间重叠**：相同范围（传感器/库区/类型有交集）的 active 规则不能时间重叠
+- **禁止结束早于开始**：`end_time` 必须严格大于 `start_time`
+- **权限约束**：只有 admin 和 operator 可以创建/撤销抑制规则，observer 只能查看
+- **审计追踪**：每条 suppressed 报警都有对应 suppression_rule_id 和命中日志
+- **到期自动恢复**：窗口结束后新异常读数正常生成 open 报警
+- **撤销恢复**：撤销规则后新异常读数正常生成 open 报警
+
+#### 1. 创建抑制规则（按传感器 + 类型）
+
+```bash
+curl -X POST http://localhost:8000/suppression-rules \
+  -H "Content-Type: application/json" \
+  -d '{
+    "sensor_id": 1,
+    "alarm_type": "over_temp",
+    "start_time": "2026-06-15T00:00:00",
+    "end_time": "2026-06-15T23:59:59",
+    "reason": "传感器检修",
+    "created_by": 1
+  }'
+```
+
+预期结果：返回 200，包含规则详情（status=active）。
+
+#### 2. 创建抑制规则（按库区，全部类型）
+
+```bash
+curl -X POST http://localhost:8000/suppression-rules \
+  -H "Content-Type: application/json" \
+  -d '{
+    "zone_id": 1,
+    "start_time": "2026-06-16T00:00:00",
+    "end_time": "2026-06-16T23:59:59",
+    "reason": "库区整体维护",
+    "created_by": 2
+  }'
+```
+
+#### 3. 查看抑制规则列表
+
+```bash
+# 全部规则
+curl -X GET http://localhost:8000/suppression-rules
+
+# 按状态筛选
+curl -X GET "http://localhost:8000/suppression-rules?status=active"
+
+# 按传感器筛选
+curl -X GET "http://localhost:8000/suppression-rules?sensor_id=1"
+```
+
+#### 4. 查看抑制规则详情
+
+```bash
+curl -X GET http://localhost:8000/suppression-rules/1
+```
+
+预期结果：包含规则信息、创建人姓名、命中次数（hit_count）等。
+
+#### 5. 撤销抑制规则
+
+```bash
+curl -X POST http://localhost:8000/suppression-rules/1/revoke \
+  -H "Content-Type: application/json" \
+  -d '{"person_id": 1}'
+```
+
+预期结果：返回 200，规则状态变为 revoked。撤销后新异常读数会正常生成 open 报警。
+
+#### 6. 查看抑制命中日志
+
+```bash
+curl -X GET http://localhost:8000/suppression-rules/1/hits
+```
+
+预期结果：每条命中包含 rule_id、alarm_id、sensor_code、alarm_type、trigger_value、trigger_time。
+
+#### 7. 导出抑制规则 CSV
+
+```bash
+curl -X GET "http://localhost:8000/suppression-rules/export.csv" -o suppression_rules.csv
+```
+
+#### 8. 导出抑制命中日志 CSV
+
+```bash
+curl -X GET "http://localhost:8000/suppression-hits/export.csv" -o suppression_hits.csv
+```
+
+#### 9. 失败场景：时间重叠冲突
+
+```bash
+# 先创建一条 active 规则
+curl -X POST http://localhost:8000/suppression-rules \
+  -H "Content-Type: application/json" \
+  -d '{
+    "sensor_id": 1,
+    "start_time": "2026-06-17T00:00:00",
+    "end_time": "2026-06-17T23:59:59",
+    "reason": "测试冲突1",
+    "created_by": 1
+  }'
+
+# 再创建一条时间重叠的同范围规则
+curl -X POST http://localhost:8000/suppression-rules \
+  -H "Content-Type: application/json" \
+  -d '{
+    "sensor_id": 1,
+    "start_time": "2026-06-17T12:00:00",
+    "end_time": "2026-06-18T12:00:00",
+    "reason": "测试冲突2",
+    "created_by": 1
+  }'
+```
+
+预期结果：第二条返回 409 Conflict，提示与现有规则冲突。
+
+---
+
 ## 自动化测试
 
-项目包含 2 个 Python 测试脚本，用于回归验证所有用户可见行为。
+项目包含 3 个 Python 测试脚本，用于回归验证所有用户可见行为。
 
 ### 1. 复现与回归测试（修复项验证）
 
@@ -371,20 +501,38 @@ python test_alarm_fixes.py
 - **TEST 4**: 完整报警生命周期（确认→处理→升级→关闭）+ 去重窗口 + 处理说明/确认记录留存
 - **TEST 5**: 报警 CSV/JSON 导出，ID 集合与 API 查询完全一致
 
-### 2. 重启后一致性验证
+### 2. 报警抑制规则综合测试
 
 ```bash
-# 先跑一轮 test_alarm_fixes.py，然后重启 uvicorn
+python test_suppression_comprehensive.py
+```
+
+覆盖内容:
+- 权限验证（observer 不能创建/撤销抑制规则）
+- 时间验证（结束早于开始、时间重叠冲突）
+- 按传感器/库区/报警类型抑制
+- 撤销抑制后恢复触发
+- 抑制到期后恢复触发
+- 抑制命中日志审计
+- 导入统计一致（JSON/CSV/直接导入都有 suppressed_alarms）
+- CSV 导出（规则、命中日志、报警）
+
+### 3. 重启后一致性验证
+
+```bash
+# 先跑一轮 test_suppression_comprehensive.py，然后重启 uvicorn
 python test_restart_consistency.py
 ```
 
 验证内容:
-- 重启后所有报警（offline/over_temp）数量、类型、状态一致
+- 重启后所有报警（offline/over_temp/under_temp）数量、类型、状态一致
 - 已关闭报警的 `resolution_note` 和 `confirmations` 记录完整
 - 离线报警 `trigger_value` 为 `None`
 - 报警 CSV/JSON 导出行数、ID 集合与 API 查询一致
 - 温度读数 CSV/API 条数一致
 - 配置数据（人员/传感器/库区/阈值版本）完整保留
+- **抑制规则**：规则列表、状态、命中日志、CSV 导出跨重启一致
+- **suppressed 状态报警**：suppression_rule_id 和 suppression_rule_reason 完整保留
 
 ---
 
@@ -399,8 +547,10 @@ python test_restart_consistency.py
 | `sensors` | 传感器信息 |
 | `threshold_versions` | 阈值版本（版本化管理） |
 | `temperature_readings` | 温度读数 |
-| `alarms` | 报警记录 |
+| `alarms` | 报警记录（含 suppression_rule_id 关联抑制规则） |
 | `alarm_confirmations` | 报警状态变更记录 |
+| `suppression_rules` | 抑制规则（支持按传感器/库区/类型 + 时间窗口） |
+| `suppression_hits` | 抑制命中日志（记录触发值、时间、关联报警和规则） |
 
 服务重启后，所有数据保留，查询和导出结果一致。
 
@@ -409,13 +559,14 @@ python test_restart_consistency.py
 ```
 .
 ├── main.py                    # 主应用入口，API 路由
-├── models.py                  # SQLAlchemy 数据模型
+├── models.py                  # SQLAlchemy 数据模型（含 SuppressionRule / SuppressionHit）
 ├── schemas.py                 # Pydantic 请求/响应模式
-├── crud.py                    # 基础 CRUD 操作
-├── alarm_service.py           # 报警核心业务逻辑
+├── crud.py                    # 基础 CRUD 操作（含抑制规则 CRUD）
+├── alarm_service.py           # 报警核心业务逻辑（含抑制命中处理）
 ├── database.py                # 数据库连接配置
 ├── init_data.py               # 样例数据初始化脚本
 ├── test_alarm_fixes.py        # 复现与回归测试脚本
+├── test_suppression_comprehensive.py  # 抑制规则综合测试
 ├── test_restart_consistency.py# 重启后一致性测试
 ├── requirements.txt           # Python 依赖
 ├── examples/                  # 样例数据

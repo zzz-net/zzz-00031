@@ -327,16 +327,6 @@ def escalate_alarm(alarm_id: int, update: schemas.AlarmStatusUpdate, db: Session
     return alarm_service.get_alarm_detail(db, alarm_id)
 
 
-@app.post("/alarms/{alarm_id}/suppress", tags=["Alarms"])
-def suppress_alarm(alarm_id: int, update: schemas.AlarmSuppressUpdate, db: Session = Depends(get_db)):
-    alarm, error = alarm_service.transition_alarm_status(
-        db, alarm_id, update.person_id, schemas.AlarmStatusEnum.SUPPRESSED, update.note
-    )
-    if error:
-        raise HTTPException(status_code=400, detail=error)
-    return alarm_service.get_alarm_detail(db, alarm_id)
-
-
 @app.post("/alarms/{alarm_id}/close", tags=["Alarms"])
 def close_alarm(alarm_id: int, update: schemas.AlarmCloseUpdate, db: Session = Depends(get_db)):
     alarm, error = alarm_service.transition_alarm_status(

@@ -189,12 +189,6 @@ class AlarmCloseUpdate(BaseModel):
     resolution_note: Optional[str] = None
 
 
-class AlarmSuppressUpdate(BaseModel):
-    person_id: int
-    note: Optional[str] = None
-    suppress_minutes: int = 60
-
-
 class SuppressionRuleStatus(str, Enum):
     ACTIVE = "active"
     REVOKED = "revoked"

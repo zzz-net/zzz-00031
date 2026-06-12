@@ -385,6 +385,9 @@ def transition_alarm_status(
         if not can_acknowledge_alarm(person):
             return None, f"Permission denied: only admin or operator can transition to {to_status.value}"
 
+    if to_status == AlarmStatusEnum.SUPPRESSED:
+        return None, "Direct suppression is deprecated. Use /suppression-rules to create a suppression rule."
+
     from_status = alarm.status
 
     confirmation = AlarmConfirmation(

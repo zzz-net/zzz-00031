@@ -1,7 +1,7 @@
 from fastapi import FastAPI, Depends, HTTPException, UploadFile, File, Query
 from fastapi.responses import StreamingResponse
 from sqlalchemy.orm import Session
-from datetime import datetime
+from datetime import datetime, date
 from typing import List, Optional
 import io
 import csv
@@ -559,3 +559,367 @@ def export_suppression_hits_csv(
         media_type="text/csv",
         headers={"Content-Disposition": "attachment; filename=suppression_hits.csv"}
     )
+
+
+# ========== Shift Checklist APIs ==========
+
+def _can_manage_checklist(person: models.Person) -> bool:
+    return person.role in [models.RoleEnum.ADMIN, models.RoleEnum.OPERATOR]
+
+
+def _build_sensor_item_detail(db: Session, item: models.ShiftChecklistSensorItem) -> dict:
+    sensor = item.sensor
+    checker = item.checker
+    handler = item.handler
+    return {
+        "id": item.id,
+        "checklist_id": item.checklist_id,
+        "sensor_id": item.sensor_id,
+        "sensor_code": sensor.code if sensor else None,
+        "sensor_name": sensor.name if sensor else None,
+        "snapshot_threshold_upper": item.snapshot_threshold_upper,
+        "snapshot_threshold_lower": item.snapshot_threshold_lower,
+        "snapshot_latest_reading_value": item.snapshot_latest_reading_value,
+        "snapshot_latest_reading_time": item.snapshot_latest_reading_time,
+        "snapshot_open_alarm_count": item.snapshot_open_alarm_count,
+        "snapshot_open_alarm_ids": item.snapshot_open_alarm_ids,
+        "check_status": item.check_status,
+        "checked_by": item.checked_by,
+        "checked_by_name": checker.name if checker else None,
+        "checked_at": item.checked_at,
+        "abnormal_remark": item.abnormal_remark,
+        "handler_id": item.handler_id,
+        "handler_name": handler.name if handler else None,
+        "created_at": item.created_at,
+        "updated_at": item.updated_at,
+    }
+
+
+def _build_manual_item_detail(db: Session, item: models.ShiftChecklistManualItem) -> dict:
+    checker = item.checker
+    handler = item.handler
+    return {
+        "id": item.id,
+        "checklist_id": item.checklist_id,
+        "item_name": item.item_name,
+        "item_description": item.item_description,
+        "check_status": item.check_status,
+        "checked_by": item.checked_by,
+        "checked_by_name": checker.name if checker else None,
+        "checked_at": item.checked_at,
+        "abnormal_remark": item.abnormal_remark,
+        "handler_id": item.handler_id,
+        "handler_name": handler.name if handler else None,
+        "sort_order": item.sort_order,
+        "created_at": item.created_at,
+        "updated_at": item.updated_at,
+    }
+
+
+def _build_checklist_detail(db: Session, checklist: models.ShiftChecklist) -> dict:
+    zone = checklist.zone
+    creator = checklist.creator
+    submitter = checklist.submitter
+    revoker = checklist.revoker
+
+    sensor_items = [
+        _build_sensor_item_detail(db, si) for si in checklist.sensor_items
+    ]
+    manual_items = [
+        _build_manual_item_detail(db, mi) for mi in checklist.manual_items
+    ]
+
+    return {
+        "id": checklist.id,
+        "zone_id": checklist.zone_id,
+        "zone_name": zone.name if zone else None,
+        "shift_date": checklist.shift_date,
+        "shift_type": checklist.shift_type,
+        "status": checklist.status,
+        "created_by": checklist.created_by,
+        "creator_name": creator.name if creator else None,
+        "creator_role": creator.role if creator else None,
+        "submitted_by": checklist.submitted_by,
+        "submitter_name": submitter.name if submitter else None,
+        "submitted_at": checklist.submitted_at,
+        "revoked_by": checklist.revoked_by,
+        "revoker_name": revoker.name if revoker else None,
+        "revoked_at": checklist.revoked_at,
+        "general_remark": checklist.general_remark,
+        "created_at": checklist.created_at,
+        "updated_at": checklist.updated_at,
+        "sensor_items": sensor_items,
+        "manual_items": manual_items,
+    }
+
+
+def _build_checklist_list_item(db: Session, checklist: models.ShiftChecklist) -> dict:
+    zone = checklist.zone
+    creator = checklist.creator
+    submitter = checklist.submitter
+    revoker = checklist.revoker
+
+    sensor_item_count = len(checklist.sensor_items) if checklist.sensor_items else 0
+    manual_item_count = len(checklist.manual_items) if checklist.manual_items else 0
+
+    all_items = (checklist.sensor_items or []) + (checklist.manual_items or [])
+    pending_count = sum(1 for i in all_items if i.check_status == models.CheckItemStatus.PENDING)
+    abnormal_count = sum(1 for i in all_items if i.check_status == models.CheckItemStatus.ABNORMAL)
+
+    return {
+        "id": checklist.id,
+        "zone_id": checklist.zone_id,
+        "zone_name": zone.name if zone else None,
+        "shift_date": checklist.shift_date,
+        "shift_type": checklist.shift_type,
+        "status": checklist.status,
+        "created_by": checklist.created_by,
+        "creator_name": creator.name if creator else None,
+        "creator_role": creator.role if creator else None,
+        "submitted_by": checklist.submitted_by,
+        "submitter_name": submitter.name if submitter else None,
+        "submitted_at": checklist.submitted_at,
+        "revoked_by": checklist.revoked_by,
+        "revoker_name": revoker.name if revoker else None,
+        "revoked_at": checklist.revoked_at,
+        "general_remark": checklist.general_remark,
+        "created_at": checklist.created_at,
+        "updated_at": checklist.updated_at,
+        "sensor_item_count": sensor_item_count,
+        "manual_item_count": manual_item_count,
+        "pending_count": pending_count,
+        "abnormal_count": abnormal_count,
+    }
+
+
+@app.post("/shift-checklists", response_model=schemas.ShiftChecklistDetail, tags=["Shift Checklists"])
+def create_shift_checklist(checklist: schemas.ShiftChecklistCreate, db: Session = Depends(get_db)):
+    person = crud.get_person(db, checklist.created_by)
+    if not person:
+        raise HTTPException(status_code=400, detail="Person not found")
+    if not _can_manage_checklist(person):
+        raise HTTPException(status_code=403, detail="Permission denied: only admin or operator can create shift checklists")
+
+    zone = crud.get_zone(db, checklist.zone_id)
+    if not zone:
+        raise HTTPException(status_code=400, detail="Zone not found")
+
+    conflict = crud.check_shift_checklist_conflict(
+        db, zone_id=checklist.zone_id,
+        shift_date=checklist.shift_date,
+        shift_type=checklist.shift_type
+    )
+    if conflict:
+        raise HTTPException(
+            status_code=409,
+            detail=f"Duplicate shift checklist: zone_id={checklist.zone_id}, "
+                   f"shift_date={checklist.shift_date}, shift_type={checklist.shift_type} "
+                   f"already exists (id={conflict.id}, status={conflict.status.value})"
+        )
+
+    db_checklist = crud.create_shift_checklist(db, checklist)
+    return _build_checklist_detail(db, db_checklist)
+
+
+@app.get("/shift-checklists", response_model=List[schemas.ShiftChecklistList], tags=["Shift Checklists"])
+def list_shift_checklists(
+    zone_id: Optional[int] = None,
+    status: Optional[schemas.ChecklistStatus] = None,
+    shift_type: Optional[schemas.ShiftEnum] = None,
+    shift_date_from: Optional[date] = None,
+    shift_date_to: Optional[date] = None,
+    created_by: Optional[int] = None,
+    skip: int = 0,
+    limit: int = 100,
+    db: Session = Depends(get_db)
+):
+    checklists = crud.list_shift_checklists(
+        db, zone_id=zone_id, status=status, shift_type=shift_type,
+        shift_date_from=shift_date_from, shift_date_to=shift_date_to,
+        created_by=created_by, skip=skip, limit=limit
+    )
+    return [_build_checklist_list_item(db, c) for c in checklists]
+
+
+@app.get("/shift-checklists/export.csv", tags=["Shift Checklists"])
+def export_shift_checklists_csv(
+    zone_id: Optional[int] = None,
+    status: Optional[schemas.ChecklistStatus] = None,
+    shift_type: Optional[schemas.ShiftEnum] = None,
+    shift_date_from: Optional[date] = None,
+    shift_date_to: Optional[date] = None,
+    db: Session = Depends(get_db)
+):
+    checklists = crud.list_shift_checklists(
+        db, zone_id=zone_id, status=status, shift_type=shift_type,
+        shift_date_from=shift_date_from, shift_date_to=shift_date_to,
+        limit=10000
+    )
+
+    output = io.StringIO()
+    writer = csv.writer(output)
+    writer.writerow([
+        'id', 'zone_id', 'zone_name', 'shift_date', 'shift_type', 'status',
+        'created_by', 'creator_name', 'submitted_by', 'submitter_name',
+        'submitted_at', 'revoked_by', 'revoker_name', 'revoked_at',
+        'general_remark', 'sensor_item_count', 'manual_item_count',
+        'pending_count', 'abnormal_count', 'created_at', 'updated_at'
+    ])
+
+    for checklist in checklists:
+        detail = _build_checklist_list_item(db, checklist)
+        status_val = detail['status'].value if hasattr(detail['status'], 'value') else str(detail['status'])
+        shift_type_val = detail['shift_type'].value if hasattr(detail['shift_type'], 'value') else str(detail['shift_type'])
+        writer.writerow([
+            detail['id'],
+            detail['zone_id'],
+            detail['zone_name'] or '',
+            detail['shift_date'],
+            shift_type_val,
+            status_val,
+            detail['created_by'],
+            detail['creator_name'] or '',
+            detail['submitted_by'] or '',
+            detail['submitter_name'] or '',
+            detail['submitted_at'].isoformat() if detail['submitted_at'] else '',
+            detail['revoked_by'] or '',
+            detail['revoker_name'] or '',
+            detail['revoked_at'].isoformat() if detail['revoked_at'] else '',
+            detail['general_remark'] or '',
+            detail['sensor_item_count'],
+            detail['manual_item_count'],
+            detail['pending_count'],
+            detail['abnormal_count'],
+            detail['created_at'].isoformat() if detail['created_at'] else '',
+            detail['updated_at'].isoformat() if detail['updated_at'] else ''
+        ])
+
+    output.seek(0)
+    return StreamingResponse(
+        io.BytesIO(output.getvalue().encode('utf-8')),
+        media_type="text/csv",
+        headers={"Content-Disposition": "attachment; filename=shift_checklists.csv"}
+    )
+
+
+@app.get("/shift-checklists/export.json", tags=["Shift Checklists"])
+def export_shift_checklists_json(
+    zone_id: Optional[int] = None,
+    status: Optional[schemas.ChecklistStatus] = None,
+    shift_type: Optional[schemas.ShiftEnum] = None,
+    shift_date_from: Optional[date] = None,
+    shift_date_to: Optional[date] = None,
+    db: Session = Depends(get_db)
+):
+    checklists = crud.list_shift_checklists(
+        db, zone_id=zone_id, status=status, shift_type=shift_type,
+        shift_date_from=shift_date_from, shift_date_to=shift_date_to,
+        limit=10000
+    )
+
+    result = [_build_checklist_list_item(db, c) for c in checklists]
+    json_str = json.dumps(result, default=str, ensure_ascii=False, indent=2)
+
+    return StreamingResponse(
+        io.BytesIO(json_str.encode('utf-8')),
+        media_type="application/json",
+        headers={"Content-Disposition": "attachment; filename=shift_checklists.json"}
+    )
+
+
+@app.get("/shift-checklists/{checklist_id}", response_model=schemas.ShiftChecklistDetail, tags=["Shift Checklists"])
+def get_shift_checklist(checklist_id: int, db: Session = Depends(get_db)):
+    checklist = crud.get_shift_checklist(db, checklist_id)
+    if not checklist:
+        raise HTTPException(status_code=404, detail="Shift checklist not found")
+    return _build_checklist_detail(db, checklist)
+
+
+@app.post("/shift-checklists/{checklist_id}/submit", response_model=schemas.ShiftChecklistDetail, tags=["Shift Checklists"])
+def submit_shift_checklist(checklist_id: int, body: schemas.ShiftChecklistSubmit, db: Session = Depends(get_db)):
+    person = crud.get_person(db, body.person_id)
+    if not person:
+        raise HTTPException(status_code=400, detail="Person not found")
+    if not _can_manage_checklist(person):
+        raise HTTPException(status_code=403, detail="Permission denied: only admin or operator can submit shift checklists")
+
+    checklist = crud.submit_shift_checklist(db, checklist_id, body.person_id, body.general_remark)
+    if not checklist:
+        cl = crud.get_shift_checklist(db, checklist_id)
+        if not cl:
+            raise HTTPException(status_code=404, detail="Shift checklist not found")
+        raise HTTPException(status_code=400, detail=f"Cannot submit checklist in status: {cl.status.value}")
+
+    return _build_checklist_detail(db, checklist)
+
+
+@app.post("/shift-checklists/{checklist_id}/revoke", response_model=schemas.ShiftChecklistDetail, tags=["Shift Checklists"])
+def revoke_shift_checklist(checklist_id: int, body: schemas.ShiftChecklistRevoke, db: Session = Depends(get_db)):
+    person = crud.get_person(db, body.person_id)
+    if not person:
+        raise HTTPException(status_code=400, detail="Person not found")
+    if not _can_manage_checklist(person):
+        raise HTTPException(status_code=403, detail="Permission denied: only admin or operator can revoke shift checklists")
+
+    checklist = crud.revoke_shift_checklist(db, checklist_id, body.person_id)
+    if not checklist:
+        cl = crud.get_shift_checklist(db, checklist_id)
+        if not cl:
+            raise HTTPException(status_code=404, detail="Shift checklist not found")
+        raise HTTPException(status_code=400, detail=f"Cannot revoke checklist in status: {cl.status.value}")
+
+    return _build_checklist_detail(db, checklist)
+
+
+@app.put("/shift-checklists/{checklist_id}/sensor-items/{item_id}", response_model=schemas.ShiftChecklistSensorItem, tags=["Shift Checklists"])
+def update_shift_checklist_sensor_item(
+    checklist_id: int,
+    item_id: int,
+    update: schemas.ShiftChecklistSensorItemUpdate,
+    db: Session = Depends(get_db)
+):
+    person = crud.get_person(db, update.person_id)
+    if not person:
+        raise HTTPException(status_code=400, detail="Person not found")
+    if not _can_manage_checklist(person):
+        raise HTTPException(status_code=403, detail="Permission denied: only admin or operator can update checklist items")
+
+    if update.handler_id is not None:
+        handler = crud.get_person(db, update.handler_id)
+        if not handler:
+            raise HTTPException(status_code=400, detail="Handler person not found")
+
+    item, error = crud.update_shift_checklist_sensor_item(
+        db, checklist_id, item_id, update.person_id,
+        update.check_status, update.abnormal_remark, update.handler_id
+    )
+    if error:
+        raise HTTPException(status_code=400, detail=error)
+    return _build_sensor_item_detail(db, item)
+
+
+@app.put("/shift-checklists/{checklist_id}/manual-items/{item_id}", response_model=schemas.ShiftChecklistManualItem, tags=["Shift Checklists"])
+def update_shift_checklist_manual_item(
+    checklist_id: int,
+    item_id: int,
+    update: schemas.ShiftChecklistManualItemUpdate,
+    db: Session = Depends(get_db)
+):
+    person = crud.get_person(db, update.person_id)
+    if not person:
+        raise HTTPException(status_code=400, detail="Person not found")
+    if not _can_manage_checklist(person):
+        raise HTTPException(status_code=403, detail="Permission denied: only admin or operator can update checklist items")
+
+    if update.handler_id is not None:
+        handler = crud.get_person(db, update.handler_id)
+        if not handler:
+            raise HTTPException(status_code=400, detail="Handler person not found")
+
+    item, error = crud.update_shift_checklist_manual_item(
+        db, checklist_id, item_id, update.person_id,
+        update.check_status, update.abnormal_remark, update.handler_id
+    )
+    if error:
+        raise HTTPException(status_code=400, detail=error)
+    return _build_manual_item_detail(db, item)

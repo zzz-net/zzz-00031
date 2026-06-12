@@ -1,7 +1,8 @@
 from sqlalchemy.orm import Session
 from sqlalchemy import desc
-from datetime import datetime
-from typing import List, Optional
+from datetime import datetime, date
+from typing import List, Optional, Tuple
+import json
 
 import models
 import schemas
@@ -305,3 +306,259 @@ def list_suppression_hits(
     if sensor_id:
         query = query.filter(models.SuppressionHit.sensor_id == sensor_id)
     return query.order_by(desc(models.SuppressionHit.created_at)).offset(skip).limit(limit).all()
+
+
+DEFAULT_MANUAL_CHECK_ITEMS = [
+    {"item_name": "制冷机组运行状态", "item_description": "检查机组是否正常运行，有无异常噪音或振动", "sort_order": 1},
+    {"item_name": "库门密封检查", "item_description": "检查库门密封条是否完好，关闭是否严密", "sort_order": 2},
+    {"item_name": "传感器外观及固定", "item_description": "检查传感器外观是否完好，安装是否牢固", "sort_order": 3},
+    {"item_name": "库区卫生情况", "item_description": "检查库区地面、货架是否清洁，有无杂物堆积", "sort_order": 4},
+    {"item_name": "应急设备检查", "item_description": "检查应急灯、报警按钮、消防设备是否正常可用", "sort_order": 5},
+]
+
+
+def get_active_open_alarms_for_sensor(db: Session, sensor_id: int) -> List[models.Alarm]:
+    active_statuses = [
+        models.AlarmStatusEnum.OPEN,
+        models.AlarmStatusEnum.ACKNOWLEDGED,
+        models.AlarmStatusEnum.PROCESSING,
+        models.AlarmStatusEnum.ESCALATED,
+    ]
+    return (
+        db.query(models.Alarm)
+        .filter(
+            models.Alarm.sensor_id == sensor_id,
+            models.Alarm.status.in_(active_statuses)
+        )
+        .order_by(desc(models.Alarm.created_at))
+        .all()
+    )
+
+
+def check_shift_checklist_conflict(
+    db: Session,
+    zone_id: int,
+    shift_date: date,
+    shift_type: models.ShiftEnum,
+    exclude_checklist_id: Optional[int] = None
+) -> Optional[models.ShiftChecklist]:
+    query = db.query(models.ShiftChecklist).filter(
+        models.ShiftChecklist.zone_id == zone_id,
+        models.ShiftChecklist.shift_date == shift_date,
+        models.ShiftChecklist.shift_type == shift_type,
+        models.ShiftChecklist.status != models.ChecklistStatus.REVOKED
+    )
+    if exclude_checklist_id:
+        query = query.filter(models.ShiftChecklist.id != exclude_checklist_id)
+    return query.first()
+
+
+def create_shift_checklist(
+    db: Session,
+    checklist_data: schemas.ShiftChecklistCreate
+) -> models.ShiftChecklist:
+    db_checklist = models.ShiftChecklist(
+        zone_id=checklist_data.zone_id,
+        shift_date=checklist_data.shift_date,
+        shift_type=checklist_data.shift_type,
+        created_by=checklist_data.created_by,
+        status=models.ChecklistStatus.DRAFT,
+        general_remark=checklist_data.general_remark
+    )
+    db.add(db_checklist)
+    db.flush()
+
+    sensors = list_sensors(db, zone_id=checklist_data.zone_id)
+    for sensor in sensors:
+        threshold = get_latest_threshold(db, sensor.id)
+        if not threshold:
+            continue
+        last_reading = (
+            db.query(models.TemperatureReading)
+            .filter(models.TemperatureReading.sensor_id == sensor.id)
+            .order_by(desc(models.TemperatureReading.reading_time))
+            .first()
+        )
+        open_alarms = get_active_open_alarms_for_sensor(db, sensor.id)
+        open_alarm_ids = [a.id for a in open_alarms]
+
+        sensor_item = models.ShiftChecklistSensorItem(
+            checklist_id=db_checklist.id,
+            sensor_id=sensor.id,
+            snapshot_threshold_upper=threshold.upper_limit,
+            snapshot_threshold_lower=threshold.lower_limit,
+            snapshot_latest_reading_value=last_reading.temperature if last_reading else None,
+            snapshot_latest_reading_time=last_reading.reading_time if last_reading else None,
+            snapshot_open_alarm_count=len(open_alarms),
+            snapshot_open_alarm_ids=json.dumps(open_alarm_ids) if open_alarm_ids else None,
+            check_status=models.CheckItemStatus.PENDING
+        )
+        db.add(sensor_item)
+
+    for idx, manual_item_def in enumerate(DEFAULT_MANUAL_CHECK_ITEMS):
+        manual_item = models.ShiftChecklistManualItem(
+            checklist_id=db_checklist.id,
+            item_name=manual_item_def["item_name"],
+            item_description=manual_item_def["item_description"],
+            sort_order=manual_item_def.get("sort_order", idx + 1),
+            check_status=models.CheckItemStatus.PENDING
+        )
+        db.add(manual_item)
+
+    db.commit()
+    db.refresh(db_checklist)
+    return db_checklist
+
+
+def get_shift_checklist(db: Session, checklist_id: int) -> Optional[models.ShiftChecklist]:
+    return (
+        db.query(models.ShiftChecklist)
+        .filter(models.ShiftChecklist.id == checklist_id)
+        .first()
+    )
+
+
+def list_shift_checklists(
+    db: Session,
+    zone_id: Optional[int] = None,
+    status: Optional[models.ChecklistStatus] = None,
+    shift_type: Optional[models.ShiftEnum] = None,
+    shift_date_from: Optional[date] = None,
+    shift_date_to: Optional[date] = None,
+    created_by: Optional[int] = None,
+    skip: int = 0,
+    limit: int = 100
+) -> List[models.ShiftChecklist]:
+    query = db.query(models.ShiftChecklist)
+    if zone_id:
+        query = query.filter(models.ShiftChecklist.zone_id == zone_id)
+    if status:
+        query = query.filter(models.ShiftChecklist.status == status)
+    if shift_type:
+        query = query.filter(models.ShiftChecklist.shift_type == shift_type)
+    if shift_date_from:
+        query = query.filter(models.ShiftChecklist.shift_date >= shift_date_from)
+    if shift_date_to:
+        query = query.filter(models.ShiftChecklist.shift_date <= shift_date_to)
+    if created_by:
+        query = query.filter(models.ShiftChecklist.created_by == created_by)
+    return query.order_by(desc(models.ShiftChecklist.created_at)).offset(skip).limit(limit).all()
+
+
+def submit_shift_checklist(
+    db: Session,
+    checklist_id: int,
+    person_id: int,
+    general_remark: Optional[str] = None
+) -> Optional[models.ShiftChecklist]:
+    checklist = get_shift_checklist(db, checklist_id)
+    if not checklist:
+        return None
+    if checklist.status != models.ChecklistStatus.DRAFT:
+        return None
+    checklist.status = models.ChecklistStatus.SUBMITTED
+    checklist.submitted_by = person_id
+    checklist.submitted_at = datetime.now()
+    if general_remark is not None:
+        checklist.general_remark = general_remark
+    db.commit()
+    db.refresh(checklist)
+    return checklist
+
+
+def revoke_shift_checklist(
+    db: Session,
+    checklist_id: int,
+    person_id: int
+) -> Optional[models.ShiftChecklist]:
+    checklist = get_shift_checklist(db, checklist_id)
+    if not checklist:
+        return None
+    if checklist.status != models.ChecklistStatus.DRAFT:
+        return None
+    checklist.status = models.ChecklistStatus.REVOKED
+    checklist.revoked_by = person_id
+    checklist.revoked_at = datetime.now()
+    db.commit()
+    db.refresh(checklist)
+    return checklist
+
+
+def update_shift_checklist_sensor_item(
+    db: Session,
+    checklist_id: int,
+    item_id: int,
+    person_id: int,
+    check_status: models.CheckItemStatus,
+    abnormal_remark: Optional[str] = None,
+    handler_id: Optional[int] = None
+) -> Tuple[Optional[models.ShiftChecklistSensorItem], Optional[str]]:
+    checklist = get_shift_checklist(db, checklist_id)
+    if not checklist:
+        return None, "Checklist not found"
+    if checklist.status == models.ChecklistStatus.REVOKED:
+        return None, "Checklist is revoked"
+    if checklist.status == models.ChecklistStatus.SUBMITTED:
+        return None, "Cannot modify submitted checklist"
+
+    item = (
+        db.query(models.ShiftChecklistSensorItem)
+        .filter(
+            models.ShiftChecklistSensorItem.id == item_id,
+            models.ShiftChecklistSensorItem.checklist_id == checklist_id
+        )
+        .first()
+    )
+    if not item:
+        return None, "Sensor item not found in this checklist"
+
+    item.check_status = check_status
+    item.checked_by = person_id
+    item.checked_at = datetime.now()
+    if abnormal_remark is not None:
+        item.abnormal_remark = abnormal_remark
+    if handler_id is not None:
+        item.handler_id = handler_id
+    db.commit()
+    db.refresh(item)
+    return item, None
+
+
+def update_shift_checklist_manual_item(
+    db: Session,
+    checklist_id: int,
+    item_id: int,
+    person_id: int,
+    check_status: models.CheckItemStatus,
+    abnormal_remark: Optional[str] = None,
+    handler_id: Optional[int] = None
+) -> Tuple[Optional[models.ShiftChecklistManualItem], Optional[str]]:
+    checklist = get_shift_checklist(db, checklist_id)
+    if not checklist:
+        return None, "Checklist not found"
+    if checklist.status == models.ChecklistStatus.REVOKED:
+        return None, "Checklist is revoked"
+    if checklist.status == models.ChecklistStatus.SUBMITTED:
+        return None, "Cannot modify submitted checklist"
+
+    item = (
+        db.query(models.ShiftChecklistManualItem)
+        .filter(
+            models.ShiftChecklistManualItem.id == item_id,
+            models.ShiftChecklistManualItem.checklist_id == checklist_id
+        )
+        .first()
+    )
+    if not item:
+        return None, "Manual check item not found in this checklist"
+
+    item.check_status = check_status
+    item.checked_by = person_id
+    item.checked_at = datetime.now()
+    if abnormal_remark is not None:
+        item.abnormal_remark = abnormal_remark
+    if handler_id is not None:
+        item.handler_id = handler_id
+    db.commit()
+    db.refresh(item)
+    return item, None

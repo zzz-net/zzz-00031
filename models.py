@@ -1,4 +1,4 @@
-from sqlalchemy import Column, Integer, String, Float, DateTime, Boolean, ForeignKey, Text, Enum
+from sqlalchemy import Column, Integer, String, Float, DateTime, Boolean, ForeignKey, Text, Enum, Date
 from sqlalchemy.orm import relationship
 from sqlalchemy.sql import func
 import enum
@@ -177,3 +177,93 @@ class SuppressionHit(Base):
     rule = relationship("SuppressionRule", back_populates="hits")
     alarm = relationship("Alarm")
     sensor = relationship("Sensor")
+
+
+class ShiftEnum(str, enum.Enum):
+    MORNING = "morning"
+    AFTERNOON = "afternoon"
+    NIGHT = "night"
+
+
+class ChecklistStatus(str, enum.Enum):
+    DRAFT = "draft"
+    SUBMITTED = "submitted"
+    REVOKED = "revoked"
+
+
+class CheckItemStatus(str, enum.Enum):
+    PENDING = "pending"
+    NORMAL = "normal"
+    ABNORMAL = "abnormal"
+
+
+class ShiftChecklist(Base):
+    __tablename__ = "shift_checklists"
+
+    id = Column(Integer, primary_key=True, index=True)
+    zone_id = Column(Integer, ForeignKey("zones.id"), nullable=False, index=True)
+    shift_date = Column(Date, nullable=False, index=True)
+    shift_type = Column(Enum(ShiftEnum), nullable=False, index=True)
+    status = Column(Enum(ChecklistStatus), nullable=False, default=ChecklistStatus.DRAFT)
+    created_by = Column(Integer, ForeignKey("persons.id"), nullable=False)
+    submitted_by = Column(Integer, ForeignKey("persons.id"), nullable=True)
+    submitted_at = Column(DateTime(timezone=True), nullable=True)
+    revoked_by = Column(Integer, ForeignKey("persons.id"), nullable=True)
+    revoked_at = Column(DateTime(timezone=True), nullable=True)
+    general_remark = Column(Text, nullable=True)
+    created_at = Column(DateTime(timezone=True), server_default=func.now())
+    updated_at = Column(DateTime(timezone=True), server_default=func.now(), onupdate=func.now())
+
+    zone = relationship("Zone", foreign_keys=[zone_id])
+    creator = relationship("Person", foreign_keys=[created_by])
+    submitter = relationship("Person", foreign_keys=[submitted_by])
+    revoker = relationship("Person", foreign_keys=[revoked_by])
+    sensor_items = relationship("ShiftChecklistSensorItem", back_populates="checklist", cascade="all, delete-orphan")
+    manual_items = relationship("ShiftChecklistManualItem", back_populates="checklist", cascade="all, delete-orphan")
+
+
+class ShiftChecklistSensorItem(Base):
+    __tablename__ = "shift_checklist_sensor_items"
+
+    id = Column(Integer, primary_key=True, index=True)
+    checklist_id = Column(Integer, ForeignKey("shift_checklists.id"), nullable=False, index=True)
+    sensor_id = Column(Integer, ForeignKey("sensors.id"), nullable=False)
+    snapshot_threshold_upper = Column(Float, nullable=False)
+    snapshot_threshold_lower = Column(Float, nullable=False)
+    snapshot_latest_reading_value = Column(Float, nullable=True)
+    snapshot_latest_reading_time = Column(DateTime(timezone=True), nullable=True)
+    snapshot_open_alarm_count = Column(Integer, nullable=False, default=0)
+    snapshot_open_alarm_ids = Column(Text, nullable=True)
+    check_status = Column(Enum(CheckItemStatus), nullable=False, default=CheckItemStatus.PENDING)
+    checked_by = Column(Integer, ForeignKey("persons.id"), nullable=True)
+    checked_at = Column(DateTime(timezone=True), nullable=True)
+    abnormal_remark = Column(Text, nullable=True)
+    handler_id = Column(Integer, ForeignKey("persons.id"), nullable=True)
+    created_at = Column(DateTime(timezone=True), server_default=func.now())
+    updated_at = Column(DateTime(timezone=True), server_default=func.now(), onupdate=func.now())
+
+    checklist = relationship("ShiftChecklist", back_populates="sensor_items")
+    sensor = relationship("Sensor", foreign_keys=[sensor_id])
+    checker = relationship("Person", foreign_keys=[checked_by])
+    handler = relationship("Person", foreign_keys=[handler_id])
+
+
+class ShiftChecklistManualItem(Base):
+    __tablename__ = "shift_checklist_manual_items"
+
+    id = Column(Integer, primary_key=True, index=True)
+    checklist_id = Column(Integer, ForeignKey("shift_checklists.id"), nullable=False, index=True)
+    item_name = Column(String(200), nullable=False)
+    item_description = Column(String(500), nullable=True)
+    check_status = Column(Enum(CheckItemStatus), nullable=False, default=CheckItemStatus.PENDING)
+    checked_by = Column(Integer, ForeignKey("persons.id"), nullable=True)
+    checked_at = Column(DateTime(timezone=True), nullable=True)
+    abnormal_remark = Column(Text, nullable=True)
+    handler_id = Column(Integer, ForeignKey("persons.id"), nullable=True)
+    sort_order = Column(Integer, nullable=False, default=0)
+    created_at = Column(DateTime(timezone=True), server_default=func.now())
+    updated_at = Column(DateTime(timezone=True), server_default=func.now(), onupdate=func.now())
+
+    checklist = relationship("ShiftChecklist", back_populates="manual_items")
+    checker = relationship("Person", foreign_keys=[checked_by])
+    handler = relationship("Person", foreign_keys=[handler_id])

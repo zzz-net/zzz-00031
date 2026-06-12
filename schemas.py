@@ -1,5 +1,5 @@
 from pydantic import BaseModel, Field
-from datetime import datetime
+from datetime import datetime, date
 from typing import Optional, List
 from enum import Enum
 
@@ -260,3 +260,137 @@ class ReadingImportResult(BaseModel):
 
 
 AlarmDetail.model_rebuild()
+
+
+class ShiftEnum(str, Enum):
+    MORNING = "morning"
+    AFTERNOON = "afternoon"
+    NIGHT = "night"
+
+
+class ChecklistStatus(str, Enum):
+    DRAFT = "draft"
+    SUBMITTED = "submitted"
+    REVOKED = "revoked"
+
+
+class CheckItemStatus(str, Enum):
+    PENDING = "pending"
+    NORMAL = "normal"
+    ABNORMAL = "abnormal"
+
+
+class ShiftChecklistCreate(BaseModel):
+    zone_id: int
+    shift_date: date
+    shift_type: ShiftEnum
+    created_by: int
+    general_remark: Optional[str] = None
+
+
+class ShiftChecklistSubmit(BaseModel):
+    person_id: int
+    general_remark: Optional[str] = None
+
+
+class ShiftChecklistRevoke(BaseModel):
+    person_id: int
+
+
+class ShiftChecklistSensorItemUpdate(BaseModel):
+    person_id: int
+    check_status: CheckItemStatus
+    abnormal_remark: Optional[str] = None
+    handler_id: Optional[int] = None
+
+
+class ShiftChecklistManualItemUpdate(BaseModel):
+    person_id: int
+    check_status: CheckItemStatus
+    abnormal_remark: Optional[str] = None
+    handler_id: Optional[int] = None
+
+
+class ShiftChecklistSensorItem(BaseModel):
+    id: int
+    checklist_id: int
+    sensor_id: int
+    sensor_code: Optional[str] = None
+    sensor_name: Optional[str] = None
+    snapshot_threshold_upper: float
+    snapshot_threshold_lower: float
+    snapshot_latest_reading_value: Optional[float] = None
+    snapshot_latest_reading_time: Optional[datetime] = None
+    snapshot_open_alarm_count: int = 0
+    snapshot_open_alarm_ids: Optional[str] = None
+    check_status: CheckItemStatus
+    checked_by: Optional[int] = None
+    checked_by_name: Optional[str] = None
+    checked_at: Optional[datetime] = None
+    abnormal_remark: Optional[str] = None
+    handler_id: Optional[int] = None
+    handler_name: Optional[str] = None
+    created_at: datetime
+    updated_at: datetime
+
+    class Config:
+        from_attributes = True
+
+
+class ShiftChecklistManualItem(BaseModel):
+    id: int
+    checklist_id: int
+    item_name: str
+    item_description: Optional[str] = None
+    check_status: CheckItemStatus
+    checked_by: Optional[int] = None
+    checked_by_name: Optional[str] = None
+    checked_at: Optional[datetime] = None
+    abnormal_remark: Optional[str] = None
+    handler_id: Optional[int] = None
+    handler_name: Optional[str] = None
+    sort_order: int
+    created_at: datetime
+    updated_at: datetime
+
+    class Config:
+        from_attributes = True
+
+
+class ShiftChecklistBase(BaseModel):
+    id: int
+    zone_id: int
+    zone_name: Optional[str] = None
+    shift_date: date
+    shift_type: ShiftEnum
+    status: ChecklistStatus
+    created_by: int
+    creator_name: Optional[str] = None
+    creator_role: Optional[RoleEnum] = None
+    submitted_by: Optional[int] = None
+    submitter_name: Optional[str] = None
+    submitted_at: Optional[datetime] = None
+    revoked_by: Optional[int] = None
+    revoker_name: Optional[str] = None
+    revoked_at: Optional[datetime] = None
+    general_remark: Optional[str] = None
+    created_at: datetime
+    updated_at: datetime
+
+
+class ShiftChecklistList(ShiftChecklistBase):
+    sensor_item_count: int = 0
+    manual_item_count: int = 0
+    pending_count: int = 0
+    abnormal_count: int = 0
+
+    class Config:
+        from_attributes = True
+
+
+class ShiftChecklistDetail(ShiftChecklistBase):
+    sensor_items: List[ShiftChecklistSensorItem] = []
+    manual_items: List[ShiftChecklistManualItem] = []
+
+    class Config:
+        from_attributes = True

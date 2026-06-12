@@ -653,6 +653,9 @@ python test_restart_consistency.py
 - **静音计划（抑制规则）**：规则列表、状态、命中日志、CSV 导出跨重启一致
 - **suppressed 状态报警**：suppression_rule_id 和 suppression_rule_reason 完整保留
 - 静音命中记录可追溯：每条 suppressed 报警都能在命中日志中找到对应记录
+- **交接班巡检清单**：清单数据、检查项快照（阈值/读数/报警数）、检查结果、处理人信息完整保留
+- 快照不变性：重启后传感器快照阈值、最近读数、未处理报警数与创建时一致
+- 导出一致性：CSV/JSON 导出的报警数量和检查项状态与 API 查询一致
 
 ---
 
@@ -671,8 +674,242 @@ python test_restart_consistency.py
 | `alarm_confirmations` | 报警状态变更记录 |
 | `suppression_rules` | 静音计划（支持按传感器/库区/类型 + 时间窗口） |
 | `suppression_hits` | 静音命中日志（记录触发值、时间、关联报警和计划） |
+| `shift_checklists` | 交接班巡检清单（按库区+班次生成） |
+| `shift_checklist_sensor_items` | 传感器检查项（快照阈值、读数、报警） |
+| `shift_checklist_manual_items` | 现场手动检查项（制冷机组、库门密封等） |
 
 服务重启后，所有数据保留，查询和导出结果一致。
+
+---
+
+## 九、交接班巡检清单
+
+值班人员可按库区生成班次巡检清单，自动快照每个传感器的当前阈值、最近读数和未处理报警数量，并生成5项固定现场确认检查项。清单创建后可逐项追加检查结果、异常备注和处理人；提交后不可再改；同一库区同一班次（日期+班次类型）不能重复创建。
+
+### 班次类型
+
+| 类型 | 说明 |
+|------|------|
+| `morning` | 早班 |
+| `afternoon` | 中班 |
+| `night` | 晚班 |
+
+### 清单状态
+
+| 状态 | 说明 |
+|------|------|
+| `draft` | 草稿，可追加检查结果、可提交、可撤回 |
+| `submitted` | 已提交，不可修改 |
+| `revoked` | 已撤回，不可修改，但可重建同班次清单 |
+
+### 检查项状态
+
+| 状态 | 说明 |
+|------|------|
+| `pending` | 待检查 |
+| `normal` | 正常 |
+| `abnormal` | 异常（需填写异常备注，可指定处理人） |
+
+### 自动生成的手动检查项
+
+创建清单时自动生成以下5项现场确认检查项：
+
+1. 制冷机组运行状态 — 检查机组是否正常运行，有无异常噪音或振动
+2. 库门密封检查 — 检查库门密封条是否完好，关闭是否严密
+3. 传感器外观及固定 — 检查传感器外观是否完好，安装是否牢固
+4. 库区卫生情况 — 检查库区地面、货架是否清洁，有无杂物堆积
+5. 应急设备检查 — 检查应急灯、报警按钮、消防设备是否正常可用
+
+### 约束条件
+
+- **禁止重复班次**：同一库区同一日期同一班次类型不能重复创建（revoked 的不参与冲突检测）
+- **权限约束**：只有 admin 和 operator 可以创建/提交/撤回/更新检查项，observer 只能查看
+- **已提交不可修改**：提交后的清单不能再修改检查项、再提交或撤回
+- **已撤回不可修改**：撤回后的清单不能再修改检查项
+- **快照不可变**：创建时快照的阈值、读数、报警数据不受后续导入或阈值变更影响
+
+#### 1. 创建交接班巡检清单
+
+```bash
+curl -X POST http://localhost:8000/shift-checklists \
+  -H "Content-Type: application/json" \
+  -d '{
+    "zone_id": 1,
+    "shift_date": "2026-06-12",
+    "shift_type": "morning",
+    "created_by": 1,
+    "general_remark": "早班巡检"
+  }'
+```
+
+预期结果：返回 200，包含清单详情（status=draft），sensor_items 含该库区所有传感器的快照数据，manual_items 含5项现场检查项。
+
+#### 2. 查看清单列表
+
+```bash
+# 全部清单
+curl -X GET http://localhost:8000/shift-checklists
+
+# 按库区筛选
+curl -X GET "http://localhost:8000/shift-checklists?zone_id=1"
+
+# 按状态筛选
+curl -X GET "http://localhost:8000/shift-checklists?status=draft"
+
+# 按班次类型筛选
+curl -X GET "http://localhost:8000/shift-checklists?shift_type=morning"
+
+# 按日期范围筛选
+curl -X GET "http://localhost:8000/shift-checklists?shift_date_from=2026-06-01&shift_date_to=2026-06-30"
+
+# 按创建人筛选
+curl -X GET "http://localhost:8000/shift-checklists?created_by=1"
+```
+
+#### 3. 查看清单详情
+
+```bash
+curl -X GET http://localhost:8000/shift-checklists/1
+```
+
+预期结果：包含清单信息、创建人姓名/角色、传感器检查项（含 sensor_code、快照阈值、最近读数、未处理报警数）、手动检查项。
+
+#### 4. 更新传感器检查项
+
+```bash
+# 标记为正常
+curl -X PUT http://localhost:8000/shift-checklists/1/sensor-items/1 \
+  -H "Content-Type: application/json" \
+  -d '{"person_id": 2, "check_status": "normal"}'
+
+# 标记为异常（带备注和处理人）
+curl -X PUT http://localhost:8000/shift-checklists/1/sensor-items/1 \
+  -H "Content-Type: application/json" \
+  -d '{
+    "person_id": 2,
+    "check_status": "abnormal",
+    "abnormal_remark": "温度偏离正常范围",
+    "handler_id": 1
+  }'
+```
+
+#### 5. 更新手动检查项
+
+```bash
+curl -X PUT http://localhost:8000/shift-checklists/1/manual-items/1 \
+  -H "Content-Type: application/json" \
+  -d '{"person_id": 2, "check_status": "normal"}'
+```
+
+#### 6. 提交清单
+
+```bash
+curl -X POST http://localhost:8000/shift-checklists/1/submit \
+  -H "Content-Type: application/json" \
+  -d '{"person_id": 1, "general_remark": "早班巡检完毕，一切正常"}'
+```
+
+预期结果：返回 200，状态变为 submitted。提交后不可再修改。
+
+#### 7. 撤回未提交清单
+
+```bash
+curl -X POST http://localhost:8000/shift-checklists/1/revoke \
+  -H "Content-Type: application/json" \
+  -d '{"person_id": 1}'
+```
+
+预期结果：返回 200，状态变为 revoked。撤回后可重建同班次清单。
+
+#### 8. 导出清单 CSV
+
+```bash
+curl -X GET "http://localhost:8000/shift-checklists/export.csv" -o shift_checklists.csv
+```
+
+#### 9. 导出清单 JSON
+
+```bash
+curl -X GET "http://localhost:8000/shift-checklists/export.json" -o shift_checklists.json
+```
+
+#### 10. 失败场景验证
+
+##### 场景 1：observer 不能创建清单（403）
+
+```bash
+curl -X POST http://localhost:8000/shift-checklists \
+  -H "Content-Type: application/json" \
+  -d '{
+    "zone_id": 1,
+    "shift_date": "2026-06-20",
+    "shift_type": "morning",
+    "created_by": 3
+  }'
+```
+
+预期结果：返回 403，提示 "Permission denied: only admin or operator can create shift checklists"
+
+##### 场景 2：重复班次冲突（409）
+
+```bash
+# 先创建一条
+curl -X POST http://localhost:8000/shift-checklists \
+  -H "Content-Type: application/json" \
+  -d '{"zone_id": 1, "shift_date": "2026-06-21", "shift_type": "morning", "created_by": 1}'
+
+# 再创建同库区同班次
+curl -X POST http://localhost:8000/shift-checklists \
+  -H "Content-Type: application/json" \
+  -d '{"zone_id": 1, "shift_date": "2026-06-21", "shift_type": "morning", "created_by": 1}'
+```
+
+预期结果：第二条返回 409 Conflict，提示 "Duplicate shift checklist"。
+
+##### 场景 3：撤回后重建同班次
+
+```bash
+# 撤回上面的清单（假设 ID=1）
+curl -X POST http://localhost:8000/shift-checklists/1/revoke \
+  -H "Content-Type: application/json" \
+  -d '{"person_id": 1}'
+
+# 重建同班次清单，应成功
+curl -X POST http://localhost:8000/shift-checklists \
+  -H "Content-Type: application/json" \
+  -d '{"zone_id": 1, "shift_date": "2026-06-21", "shift_type": "morning", "created_by": 1}'
+```
+
+预期结果：撤回成功（status=revoked），重建成功（status=draft）。
+
+##### 场景 4：导入读数后清单快照不被旧数据改写
+
+```bash
+# 步骤1: 创建清单（记录快照）
+curl -X POST http://localhost:8000/shift-checklists \
+  -H "Content-Type: application/json" \
+  -d '{"zone_id": 1, "shift_date": "2026-06-22", "shift_type": "morning", "created_by": 1}'
+
+# 步骤2: 查看清单详情，记录 snapshot_threshold_upper 等快照值
+curl -X GET http://localhost:8000/shift-checklists/1
+
+# 步骤3: 导入新的温度读数（会触发新报警或改变最新读数）
+curl -X POST http://localhost:8000/readings/import \
+  -H "Content-Type: application/json" \
+  -d '[{"sensor_code": "TEMP-001", "temperature": -10.0, "reading_time": "2026-06-22T10:00:00"}]'
+
+# 步骤4: 修改阈值
+curl -X POST http://localhost:8000/thresholds \
+  -H "Content-Type: application/json" \
+  -d '{"sensor_id": 1, "upper_limit": -10.0, "lower_limit": -30.0, "dedup_window_minutes": 60, "effective_from": "2026-06-22T00:00:00"}'
+
+# 步骤5: 再次查看清单详情，验证快照值未变
+curl -X GET http://localhost:8000/shift-checklists/1
+```
+
+预期结果：清单中 sensor_items 的 snapshot_threshold_upper/lower、snapshot_latest_reading_value、snapshot_open_alarm_count 等快照值与步骤2完全相同，不受步骤3、4的影响。
+
+---
 
 ## 项目结构
 
@@ -691,6 +928,8 @@ python test_restart_consistency.py
 ├── test_suppression_regression.py     # 静音计划回归测试（旧手工抑制漏洞）
 ├── test_restart_consistency.py# 重启后一致性测试
 ├── test_final_verify.py       # 最终验证脚本（README 文档示例验证）
+├── test_shift_checklist.py             # 交接班巡检清单全面测试
+├── test_shift_checklist_restart.py     # 交接班巡检清单跨重启一致性测试
 ├── requirements.txt           # Python 依赖
 ├── examples/                  # 样例数据
 │   ├── readings_sample.json

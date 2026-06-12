@@ -677,6 +677,11 @@ python test_restart_consistency.py
 | `shift_checklists` | 交接班巡检清单（按库区+班次生成） |
 | `shift_checklist_sensor_items` | 传感器检查项（快照阈值、读数、报警） |
 | `shift_checklist_manual_items` | 现场手动检查项（制冷机组、库门密封等） |
+| `drills` | 温控策略演练配置与状态 |
+| `drill_readings` | 演练模拟读数 |
+| `drill_judgments` | 演练逐条判定明细 |
+| `drill_alarm_changes` | 演练报警变化记录 |
+| `drill_operation_logs` | 演练操作日志 |
 
 服务重启后，所有数据保留，查询和导出结果一致。
 
@@ -911,6 +916,337 @@ curl -X GET http://localhost:8000/shift-checklists/1
 
 ---
 
+## 十、温控策略演练
+
+主管可针对库区配置演练策略（目标温度、允许波动、持续时长），导入模拟读数后发起演练，系统按时间顺序计算每个传感器是否会触发报警、升级或恢复。演练结果完全落库，与真实报警系统隔离，服务重启后状态和明细仍可查。
+
+### 演练状态
+
+| 状态 | 说明 |
+|------|------|
+| `draft` | 草稿，可导入读数、可启动、可取消 |
+| `running` | 已启动，模拟结果已计算，可完成或取消 |
+| `completed` | 已完成，不可修改 |
+| `cancelled` | 已取消，不可修改 |
+
+### 判定动作
+
+| 动作 | 说明 |
+|------|------|
+| `trigger` | 新报警触发 |
+| `update` | 报警持续，温度更新 |
+| `escalate` | 报警升级（偏差继续增大） |
+| `recover` | 报警恢复（温度回归正常） |
+| `none` | 温度正常，无报警变化 |
+
+### 报警变化类型
+
+| 类型 | 说明 |
+|------|------|
+| `new_alarm` | 新报警产生 |
+| `status_update` | 报警状态更新（持续但未升级） |
+| `escalated` | 报警升级 |
+| `recovered` | 报警恢复关闭 |
+
+### 权限矩阵
+
+| 操作 | admin | operator | observer |
+|------|-------|----------|----------|
+| 创建演练 | ✅ | ❌ | ❌ |
+| 导入模拟读数 | ✅ | ❌ | ❌ |
+| 启动演练 | ✅ | ✅ | ❌ |
+| 取消演练 | ✅ | ❌ | ❌ |
+| 完成演练 | ✅ | ❌ | ❌ |
+| 查看演练 | ✅ | ✅ | ✅ |
+| 导出演练 | ✅ | ❌ | ❌ |
+
+### 约束条件
+
+- **同一库区不能同时运行**：同一库区不能有两场 status=running 的演练
+- **已启动配置不可改**：演练一旦启动，配置和读数不可变更
+- **读数仅限草稿**：模拟读数只能在 draft 状态导入
+- **传感器归属校验**：导入的 sensor_code 必须属于演练配置的库区
+- **演练与真实隔离**：演练不产生真实的温度读数和报警记录
+
+### 阈值计算
+
+- 上限 = 目标温度 + 允许波动（`upper_limit = target_temp + allowed_fluctuation`）
+- 下限 = 目标温度 - 允许波动（`lower_limit = target_temp - allowed_fluctuation`）
+- 升级判定：若偏差超过历史最大偏差，报警升级（如超温时温度继续升高、低温时温度继续降低）
+
+#### 1. 创建演练
+
+```bash
+curl -X POST http://localhost:8000/drills \
+  -H "Content-Type: application/json" \
+  -d '{
+    "zone_id": 1,
+    "name": "冷冻库区A超温演练",
+    "target_temp": -18.0,
+    "allowed_fluctuation": 3.0,
+    "duration_minutes": 120,
+    "created_by": 1
+  }'
+```
+
+预期结果：返回 200，status=draft，upper_limit=-15.0，lower_limit=-21.0。
+
+#### 2. 导入模拟读数（JSON 文件）
+
+```bash
+curl -X POST http://localhost:8000/drills/1/readings/import-json \
+  -F "file=@examples/drill_readings_sample.json"
+```
+
+JSON 格式示例（`examples/drill_readings_sample.json`）：
+
+```json
+[
+  {"sensor_code": "TEMP-001", "temperature": -18.5, "reading_time": "2026-06-12T08:00:00"},
+  {"sensor_code": "TEMP-001", "temperature": -14.0, "reading_time": "2026-06-12T08:30:00"},
+  {"sensor_code": "TEMP-001", "temperature": -12.0, "reading_time": "2026-06-12T09:00:00"},
+  {"sensor_code": "TEMP-001", "temperature": -18.0, "reading_time": "2026-06-12T09:30:00"}
+]
+```
+
+#### 3. 导入模拟读数（CSV 文件）
+
+```bash
+curl -X POST http://localhost:8000/drills/1/readings/import-csv \
+  -F "file=@examples/drill_readings_sample.csv"
+```
+
+CSV 格式示例（`examples/drill_readings_sample.csv`）：
+
+```csv
+sensor_code,temperature,reading_time
+TEMP-001,-18.5,2026-06-12T08:00:00
+TEMP-001,-14.0,2026-06-12T08:30:00
+TEMP-001,-12.0,2026-06-12T09:00:00
+TEMP-001,-18.0,2026-06-12T09:30:00
+```
+
+#### 4. 启动演练
+
+```bash
+curl -X POST http://localhost:8000/drills/1/start \
+  -H "Content-Type: application/json" \
+  -d '{"person_id": 1}'
+```
+
+预期结果：返回 200，status=running，包含 judgments（逐条判定）和 alarm_changes（报警变化）。
+- -14.0 → trigger（over_temp，超上限 -15.0）
+- -12.0 → escalate（偏差继续增大）
+- -18.0 → recover（温度回归正常范围）
+
+#### 5. 完成演练
+
+```bash
+curl -X POST http://localhost:8000/drills/1/complete \
+  -H "Content-Type: application/json" \
+  -d '{"person_id": 1}'
+```
+
+预期结果：返回 200，status=completed。
+
+#### 6. 取消演练
+
+```bash
+# 取消草稿
+curl -X POST http://localhost:8000/drills/1/cancel \
+  -H "Content-Type: application/json" \
+  -d '{"person_id": 1}'
+
+# 取消运行中的演练
+curl -X POST http://localhost:8000/drills/2/cancel \
+  -H "Content-Type: application/json" \
+  -d '{"person_id": 1}'
+```
+
+预期结果：返回 200，status=cancelled。取消后可新建同库区的新演练。
+
+#### 7. 查看演练列表
+
+```bash
+# 全部演练
+curl -X GET http://localhost:8000/drills
+
+# 按库区筛选
+curl -X GET "http://localhost:8000/drills?zone_id=1"
+
+# 按状态筛选
+curl -X GET "http://localhost:8000/drills?status=running"
+```
+
+#### 8. 查看演练详情
+
+```bash
+curl -X GET http://localhost:8000/drills/1
+```
+
+预期结果：包含演练配置、判定明细（judgments）、报警变化（alarm_changes）、操作日志（operation_logs）。
+
+#### 9. 导出演练结果 JSON
+
+```bash
+curl -X GET http://localhost:8000/drills/1/export.json -o drill_1_export.json
+```
+
+预期结果：JSON 文件包含 config_snapshot（配置快照）、judgments（逐条判定）、alarm_changes（报警变化）、operation_logs（操作日志）。
+
+#### 10. 导出演练列表 CSV
+
+```bash
+curl -X GET "http://localhost:8000/drills/export.csv" -o drills.csv
+```
+
+#### 11. 失败场景验证
+
+##### 场景 1：observer 不能创建演练（403）
+
+```bash
+curl -X POST http://localhost:8000/drills \
+  -H "Content-Type: application/json" \
+  -d '{
+    "zone_id": 1,
+    "name": "observer尝试创建",
+    "target_temp": -18.0,
+    "allowed_fluctuation": 3.0,
+    "duration_minutes": 120,
+    "created_by": 3
+  }'
+```
+
+预期结果：返回 403，提示 "Permission denied: only admin can create drills"
+
+##### 场景 2：observer 不能启动演练（403）
+
+```bash
+curl -X POST http://localhost:8000/drills/1/start \
+  -H "Content-Type: application/json" \
+  -d '{"person_id": 3}'
+```
+
+预期结果：返回 403，提示 "Permission denied: only admin or operator can start drills"
+
+##### 场景 3：operator 不能取消演练（403）
+
+```bash
+curl -X POST http://localhost:8000/drills/1/cancel \
+  -H "Content-Type: application/json" \
+  -d '{"person_id": 2}'
+```
+
+预期结果：返回 403，提示 "Permission denied: only admin can cancel drills"
+
+##### 场景 4：同一库区时间冲突（409）
+
+```bash
+# 创建并启动演练1（zone_id=1）
+curl -X POST http://localhost:8000/drills \
+  -H "Content-Type: application/json" \
+  -d '{"zone_id": 1, "name": "演练1", "target_temp": -18.0, "allowed_fluctuation": 3.0, "duration_minutes": 120, "created_by": 1}'
+
+# 导入读数并启动
+curl -X POST http://localhost:8000/drills/1/readings/import-json \
+  -F "file=@examples/drill_readings_sample.json"
+curl -X POST http://localhost:8000/drills/1/start \
+  -H "Content-Type: application/json" \
+  -d '{"person_id": 1}'
+
+# 创建演练2（同库区）并尝试启动
+curl -X POST http://localhost:8000/drills \
+  -H "Content-Type: application/json" \
+  -d '{"zone_id": 1, "name": "演练2", "target_temp": -20.0, "allowed_fluctuation": 2.0, "duration_minutes": 60, "created_by": 1}'
+
+curl -X POST http://localhost:8000/drills/2/start \
+  -H "Content-Type: application/json" \
+  -d '{"person_id": 1}'
+```
+
+预期结果：演练2启动返回 409 Conflict，提示 "Conflict: zone 1 already has a running drill"。
+
+##### 场景 5：取消后重建演练
+
+```bash
+# 取消演练1
+curl -X POST http://localhost:8000/drills/1/cancel \
+  -H "Content-Type: application/json" \
+  -d '{"person_id": 1}'
+
+# 重新创建并启动同库区演练，应成功
+curl -X POST http://localhost:8000/drills \
+  -H "Content-Type: application/json" \
+  -d '{"zone_id": 1, "name": "取消后重建演练", "target_temp": -18.0, "allowed_fluctuation": 3.0, "duration_minutes": 120, "created_by": 1}'
+```
+
+预期结果：取消成功（status=cancelled），重建成功（status=draft），可正常启动。
+
+##### 场景 6：导入格式错误
+
+```bash
+# JSON 格式错误
+echo 'not a json' > /tmp/bad.json
+curl -X POST http://localhost:8000/drills/1/readings/import-json \
+  -F "file=@/tmp/bad.json"
+```
+
+预期结果：返回 400，提示 "Invalid JSON"。
+
+```bash
+# CSV 缺少必需列
+echo "sensor_code,temp" > /tmp/bad.csv
+echo "TEMP-001,-18" >> /tmp/bad.csv
+curl -X POST http://localhost:8000/drills/1/readings/import-csv \
+  -F "file=@/tmp/bad.csv"
+```
+
+预期结果：返回 400，提示 "CSV must have columns: sensor_code, temperature, reading_time"。
+
+##### 场景 7：重启后继续查看演练
+
+```bash
+# 步骤1: 创建并完成一个演练
+curl -X POST http://localhost:8000/drills \
+  -H "Content-Type: application/json" \
+  -d '{"zone_id": 1, "name": "重启验证演练", "target_temp": -18.0, "allowed_fluctuation": 3.0, "duration_minutes": 120, "created_by": 1}'
+
+# 步骤2: 导入读数并启动
+curl -X POST http://localhost:8000/drills/1/readings/import-json \
+  -F "file=@examples/drill_readings_sample.json"
+curl -X POST http://localhost:8000/drills/1/start \
+  -H "Content-Type: application/json" \
+  -d '{"person_id": 1}'
+
+# 步骤3: 记录演练详情
+curl -X GET http://localhost:8000/drills/1
+
+# 步骤4: 重启服务
+# 停止 uvicorn 后重新启动
+uvicorn main:app --host 0.0.0.0 --port 8000
+
+# 步骤5: 再次查看演练详情，验证数据完整
+curl -X GET http://localhost:8000/drills/1
+```
+
+预期结果：重启后演练状态、判定明细、报警变化、操作日志与重启前完全一致。
+
+##### 场景 8：导出内容与 API 结果一致
+
+```bash
+# 获取演练详情
+curl -X GET http://localhost:8000/drills/1
+
+# 导出演练结果
+curl -X GET http://localhost:8000/drills/1/export.json -o drill_1_export.json
+
+# 对比：导出 JSON 中的 judgments、alarm_changes、operation_logs 与 API 返回的完全一致
+```
+
+预期结果：导出 JSON 的 config_snapshot、judgments、alarm_changes、operation_logs 与 API `/drills/1` 返回的对应字段完全一致。
+
+---
+
 ## 项目结构
 
 ```
@@ -920,6 +1256,7 @@ curl -X GET http://localhost:8000/shift-checklists/1
 ├── schemas.py                 # Pydantic 请求/响应模式
 ├── crud.py                    # 基础 CRUD 操作（含静音计划 CRUD）
 ├── alarm_service.py           # 报警核心业务逻辑（含静音命中处理）
+├── drill_service.py           # 温控策略演练核心逻辑（模拟、CRUD、导出）
 ├── database.py                # 数据库连接配置
 ├── init_data.py               # 样例数据初始化脚本
 ├── test_alarm_fixes.py        # 复现与回归测试脚本
@@ -930,9 +1267,12 @@ curl -X GET http://localhost:8000/shift-checklists/1
 ├── test_final_verify.py       # 最终验证脚本（README 文档示例验证）
 ├── test_shift_checklist.py             # 交接班巡检清单全面测试
 ├── test_shift_checklist_restart.py     # 交接班巡检清单跨重启一致性测试
+├── test_drill.py              # 温控策略演练综合测试
 ├── requirements.txt           # Python 依赖
 ├── examples/                  # 样例数据
 │   ├── readings_sample.json
-│   └── readings_sample.csv
+│   ├── readings_sample.csv
+│   ├── drill_readings_sample.json
+│   └── drill_readings_sample.csv
 └── README.md
 ```

@@ -179,6 +179,121 @@ class SuppressionHit(Base):
     sensor = relationship("Sensor")
 
 
+class DrillStatus(str, enum.Enum):
+    DRAFT = "draft"
+    RUNNING = "running"
+    COMPLETED = "completed"
+    CANCELLED = "cancelled"
+
+
+class DrillAction(str, enum.Enum):
+    TRIGGER = "trigger"
+    UPDATE = "update"
+    ESCALATE = "escalate"
+    RECOVER = "recover"
+    NONE = "none"
+
+
+class DrillAlarmChangeType(str, enum.Enum):
+    NEW_ALARM = "new_alarm"
+    STATUS_UPDATE = "status_update"
+    RECOVERED = "recovered"
+    ESCALATED = "escalated"
+
+
+class Drill(Base):
+    __tablename__ = "drills"
+
+    id = Column(Integer, primary_key=True, index=True)
+    zone_id = Column(Integer, ForeignKey("zones.id"), nullable=False, index=True)
+    name = Column(String(200), nullable=False)
+    target_temp = Column(Float, nullable=False)
+    allowed_fluctuation = Column(Float, nullable=False)
+    duration_minutes = Column(Integer, nullable=False)
+    status = Column(Enum(DrillStatus), nullable=False, default=DrillStatus.DRAFT)
+    created_by = Column(Integer, ForeignKey("persons.id"), nullable=False)
+    started_by = Column(Integer, ForeignKey("persons.id"), nullable=True)
+    started_at = Column(DateTime(timezone=True), nullable=True)
+    completed_at = Column(DateTime(timezone=True), nullable=True)
+    cancelled_by = Column(Integer, ForeignKey("persons.id"), nullable=True)
+    cancelled_at = Column(DateTime(timezone=True), nullable=True)
+    config_snapshot = Column(Text, nullable=True)
+    created_at = Column(DateTime(timezone=True), server_default=func.now())
+    updated_at = Column(DateTime(timezone=True), server_default=func.now(), onupdate=func.now())
+
+    zone = relationship("Zone", foreign_keys=[zone_id])
+    creator = relationship("Person", foreign_keys=[created_by])
+    starter = relationship("Person", foreign_keys=[started_by])
+    canceller = relationship("Person", foreign_keys=[cancelled_by])
+    readings = relationship("DrillReading", back_populates="drill", cascade="all, delete-orphan")
+    judgments = relationship("DrillJudgment", back_populates="drill", cascade="all, delete-orphan")
+    alarm_changes = relationship("DrillAlarmChange", back_populates="drill", cascade="all, delete-orphan")
+    operation_logs = relationship("DrillOperationLog", back_populates="drill", cascade="all, delete-orphan")
+
+
+class DrillReading(Base):
+    __tablename__ = "drill_readings"
+
+    id = Column(Integer, primary_key=True, index=True)
+    drill_id = Column(Integer, ForeignKey("drills.id"), nullable=False, index=True)
+    sensor_code = Column(String(50), nullable=False)
+    temperature = Column(Float, nullable=False)
+    reading_time = Column(DateTime(timezone=True), nullable=False, index=True)
+    created_at = Column(DateTime(timezone=True), server_default=func.now())
+
+    drill = relationship("Drill", back_populates="readings")
+
+
+class DrillJudgment(Base):
+    __tablename__ = "drill_judgments"
+
+    id = Column(Integer, primary_key=True, index=True)
+    drill_id = Column(Integer, ForeignKey("drills.id"), nullable=False, index=True)
+    sensor_code = Column(String(50), nullable=False)
+    temperature = Column(Float, nullable=False)
+    reading_time = Column(DateTime(timezone=True), nullable=False)
+    alarm_type = Column(Enum(AlarmTypeEnum), nullable=True)
+    action = Column(Enum(DrillAction), nullable=False)
+    previous_alarm_status = Column(String(50), nullable=True)
+    current_alarm_status = Column(String(50), nullable=True)
+    detail = Column(Text, nullable=True)
+    created_at = Column(DateTime(timezone=True), server_default=func.now())
+
+    drill = relationship("Drill", back_populates="judgments")
+
+
+class DrillAlarmChange(Base):
+    __tablename__ = "drill_alarm_changes"
+
+    id = Column(Integer, primary_key=True, index=True)
+    drill_id = Column(Integer, ForeignKey("drills.id"), nullable=False, index=True)
+    sensor_code = Column(String(50), nullable=False)
+    alarm_type = Column(Enum(AlarmTypeEnum), nullable=True)
+    change_type = Column(Enum(DrillAlarmChangeType), nullable=False)
+    from_status = Column(String(50), nullable=True)
+    to_status = Column(String(50), nullable=True)
+    trigger_value = Column(Float, nullable=True)
+    trigger_time = Column(DateTime(timezone=True), nullable=True)
+    detail = Column(Text, nullable=True)
+    created_at = Column(DateTime(timezone=True), server_default=func.now())
+
+    drill = relationship("Drill", back_populates="alarm_changes")
+
+
+class DrillOperationLog(Base):
+    __tablename__ = "drill_operation_logs"
+
+    id = Column(Integer, primary_key=True, index=True)
+    drill_id = Column(Integer, ForeignKey("drills.id"), nullable=False, index=True)
+    action = Column(String(50), nullable=False)
+    operator_id = Column(Integer, ForeignKey("persons.id"), nullable=False)
+    detail = Column(Text, nullable=True)
+    created_at = Column(DateTime(timezone=True), server_default=func.now())
+
+    drill = relationship("Drill", back_populates="operation_logs")
+    operator = relationship("Person", foreign_keys=[operator_id])
+
+
 class ShiftEnum(str, enum.Enum):
     MORNING = "morning"
     AFTERNOON = "afternoon"

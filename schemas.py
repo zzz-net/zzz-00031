@@ -280,6 +280,149 @@ class CheckItemStatus(str, Enum):
     ABNORMAL = "abnormal"
 
 
+class DrillStatusEnum(str, Enum):
+    DRAFT = "draft"
+    RUNNING = "running"
+    COMPLETED = "completed"
+    CANCELLED = "cancelled"
+
+
+class DrillActionEnum(str, Enum):
+    TRIGGER = "trigger"
+    UPDATE = "update"
+    ESCALATE = "escalate"
+    RECOVER = "recover"
+    NONE = "none"
+
+
+class DrillAlarmChangeTypeEnum(str, Enum):
+    NEW_ALARM = "new_alarm"
+    STATUS_UPDATE = "status_update"
+    RECOVERED = "recovered"
+    ESCALATED = "escalated"
+
+
+class DrillCreate(BaseModel):
+    zone_id: int
+    name: str
+    target_temp: float
+    allowed_fluctuation: float
+    duration_minutes: int
+    created_by: int
+
+
+class DrillStart(BaseModel):
+    person_id: int
+
+
+class DrillCancel(BaseModel):
+    person_id: int
+
+
+class DrillReadingCreate(BaseModel):
+    sensor_code: str
+    temperature: float
+    reading_time: datetime
+
+
+class DrillReadingItem(BaseModel):
+    id: int
+    drill_id: int
+    sensor_code: str
+    temperature: float
+    reading_time: datetime
+    created_at: datetime
+
+    class Config:
+        from_attributes = True
+
+
+class DrillJudgmentItem(BaseModel):
+    id: int
+    drill_id: int
+    sensor_code: str
+    temperature: float
+    reading_time: datetime
+    alarm_type: Optional[AlarmTypeEnum] = None
+    action: DrillActionEnum
+    previous_alarm_status: Optional[str] = None
+    current_alarm_status: Optional[str] = None
+    detail: Optional[str] = None
+    created_at: datetime
+
+    class Config:
+        from_attributes = True
+
+
+class DrillAlarmChangeItem(BaseModel):
+    id: int
+    drill_id: int
+    sensor_code: str
+    alarm_type: Optional[AlarmTypeEnum] = None
+    change_type: DrillAlarmChangeTypeEnum
+    from_status: Optional[str] = None
+    to_status: Optional[str] = None
+    trigger_value: Optional[float] = None
+    trigger_time: Optional[datetime] = None
+    detail: Optional[str] = None
+    created_at: datetime
+
+    class Config:
+        from_attributes = True
+
+
+class DrillOperationLogItem(BaseModel):
+    id: int
+    drill_id: int
+    action: str
+    operator_id: int
+    operator_name: Optional[str] = None
+    operator_role: Optional[RoleEnum] = None
+    detail: Optional[str] = None
+    created_at: datetime
+
+    class Config:
+        from_attributes = True
+
+
+class DrillDetail(BaseModel):
+    id: int
+    zone_id: int
+    zone_name: Optional[str] = None
+    name: str
+    target_temp: float
+    allowed_fluctuation: float
+    duration_minutes: int
+    status: DrillStatusEnum
+    upper_limit: Optional[float] = None
+    lower_limit: Optional[float] = None
+    created_by: int
+    creator_name: Optional[str] = None
+    creator_role: Optional[RoleEnum] = None
+    started_by: Optional[int] = None
+    starter_name: Optional[str] = None
+    started_at: Optional[datetime] = None
+    completed_at: Optional[datetime] = None
+    cancelled_by: Optional[int] = None
+    canceller_name: Optional[str] = None
+    cancelled_at: Optional[datetime] = None
+    config_snapshot: Optional[str] = None
+    reading_count: int = 0
+    judgment_count: int = 0
+    alarm_change_count: int = 0
+    created_at: datetime
+    updated_at: datetime
+
+    class Config:
+        from_attributes = True
+
+
+class DrillFullDetail(DrillDetail):
+    judgments: List[DrillJudgmentItem] = []
+    alarm_changes: List[DrillAlarmChangeItem] = []
+    operation_logs: List[DrillOperationLogItem] = []
+
+
 class ShiftChecklistCreate(BaseModel):
     zone_id: int
     shift_date: date

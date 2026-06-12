@@ -12,6 +12,7 @@ import models
 import schemas
 import crud
 import alarm_service
+import drill_service
 
 Base.metadata.create_all(bind=engine)
 
@@ -923,3 +924,278 @@ def update_shift_checklist_manual_item(
     if error:
         raise HTTPException(status_code=400, detail=error)
     return _build_manual_item_detail(db, item)
+
+
+# ========== Drill APIs ==========
+
+def _can_create_drill(person: models.Person) -> bool:
+    return person.role == models.RoleEnum.ADMIN
+
+
+def _can_start_drill(person: models.Person) -> bool:
+    return person.role in [models.RoleEnum.ADMIN, models.RoleEnum.OPERATOR]
+
+
+def _can_cancel_drill(person: models.Person) -> bool:
+    return person.role == models.RoleEnum.ADMIN
+
+
+def _can_export_drill(person: models.Person) -> bool:
+    return person.role == models.RoleEnum.ADMIN
+
+
+@app.post("/drills", response_model=schemas.DrillDetail, tags=["Drills"])
+def create_drill(drill: schemas.DrillCreate, db: Session = Depends(get_db)):
+    person = crud.get_person(db, drill.created_by)
+    if not person:
+        raise HTTPException(status_code=400, detail="Person not found")
+    if not _can_create_drill(person):
+        raise HTTPException(status_code=403, detail="Permission denied: only admin can create drills")
+
+    zone = crud.get_zone(db, drill.zone_id)
+    if not zone:
+        raise HTTPException(status_code=400, detail="Zone not found")
+
+    if drill.allowed_fluctuation <= 0:
+        raise HTTPException(status_code=400, detail="Allowed fluctuation must be positive")
+
+    if drill.duration_minutes <= 0:
+        raise HTTPException(status_code=400, detail="Duration minutes must be positive")
+
+    db_drill = drill_service.create_drill(db, drill)
+    return drill_service.build_drill_detail(db, db_drill)
+
+
+@app.get("/drills", response_model=List[schemas.DrillDetail], tags=["Drills"])
+def list_drills(
+    zone_id: Optional[int] = None,
+    status: Optional[schemas.DrillStatusEnum] = None,
+    skip: int = 0,
+    limit: int = 100,
+    db: Session = Depends(get_db)
+):
+    status_model = None
+    if status:
+        status_model = models.DrillStatus(status.value)
+    drills = drill_service.list_drills(db, zone_id=zone_id, status=status_model, skip=skip, limit=limit)
+    return [drill_service.build_drill_detail(db, d) for d in drills]
+
+
+@app.get("/drills/export.csv", tags=["Drills"])
+def export_drills_csv(
+    zone_id: Optional[int] = None,
+    status: Optional[schemas.DrillStatusEnum] = None,
+    db: Session = Depends(get_db)
+):
+    status_model = None
+    if status:
+        status_model = models.DrillStatus(status.value)
+    drills = drill_service.list_drills(db, zone_id=zone_id, status=status_model, limit=10000)
+
+    output = io.StringIO()
+    writer = csv.writer(output)
+    writer.writerow([
+        'id', 'zone_id', 'zone_name', 'name', 'target_temp', 'allowed_fluctuation',
+        'duration_minutes', 'status', 'upper_limit', 'lower_limit',
+        'created_by', 'creator_name', 'started_by', 'starter_name',
+        'started_at', 'completed_at', 'cancelled_by', 'canceller_name',
+        'cancelled_at', 'reading_count', 'judgment_count', 'alarm_change_count',
+        'created_at', 'updated_at'
+    ])
+
+    for drill in drills:
+        detail = drill_service.build_drill_detail(db, drill)
+        status_val = detail['status'].value if hasattr(detail['status'], 'value') else str(detail['status'])
+        writer.writerow([
+            detail['id'],
+            detail['zone_id'],
+            detail['zone_name'] or '',
+            detail['name'],
+            detail['target_temp'],
+            detail['allowed_fluctuation'],
+            detail['duration_minutes'],
+            status_val,
+            detail['upper_limit'],
+            detail['lower_limit'],
+            detail['created_by'],
+            detail['creator_name'] or '',
+            detail['started_by'] or '',
+            detail['starter_name'] or '',
+            detail['started_at'].isoformat() if detail['started_at'] else '',
+            detail['completed_at'].isoformat() if detail['completed_at'] else '',
+            detail['cancelled_by'] or '',
+            detail['canceller_name'] or '',
+            detail['cancelled_at'].isoformat() if detail['cancelled_at'] else '',
+            detail['reading_count'],
+            detail['judgment_count'],
+            detail['alarm_change_count'],
+            detail['created_at'].isoformat() if detail['created_at'] else '',
+            detail['updated_at'].isoformat() if detail['updated_at'] else ''
+        ])
+
+    output.seek(0)
+    return StreamingResponse(
+        io.BytesIO(output.getvalue().encode('utf-8')),
+        media_type="text/csv",
+        headers={"Content-Disposition": "attachment; filename=drills.csv"}
+    )
+
+
+@app.get("/drills/{drill_id}", response_model=schemas.DrillFullDetail, tags=["Drills"])
+def get_drill(drill_id: int, db: Session = Depends(get_db)):
+    drill = drill_service.get_drill(db, drill_id)
+    if not drill:
+        raise HTTPException(status_code=404, detail="Drill not found")
+    return drill_service.build_drill_full_detail(db, drill)
+
+
+@app.post("/drills/{drill_id}/start", response_model=schemas.DrillFullDetail, tags=["Drills"])
+def start_drill(drill_id: int, body: schemas.DrillStart, db: Session = Depends(get_db)):
+    person = crud.get_person(db, body.person_id)
+    if not person:
+        raise HTTPException(status_code=400, detail="Person not found")
+    if not _can_start_drill(person):
+        raise HTTPException(status_code=403, detail="Permission denied: only admin or operator can start drills")
+
+    drill, error = drill_service.start_drill(db, drill_id, body.person_id)
+    if error:
+        drill_obj = drill_service.get_drill(db, drill_id)
+        if not drill_obj:
+            raise HTTPException(status_code=404, detail="Drill not found")
+        if "Conflict" in error:
+            raise HTTPException(status_code=409, detail=error)
+        raise HTTPException(status_code=400, detail=error)
+    return drill_service.build_drill_full_detail(db, drill)
+
+
+@app.post("/drills/{drill_id}/cancel", response_model=schemas.DrillDetail, tags=["Drills"])
+def cancel_drill(drill_id: int, body: schemas.DrillCancel, db: Session = Depends(get_db)):
+    person = crud.get_person(db, body.person_id)
+    if not person:
+        raise HTTPException(status_code=400, detail="Person not found")
+    if not _can_cancel_drill(person):
+        raise HTTPException(status_code=403, detail="Permission denied: only admin can cancel drills")
+
+    drill, error = drill_service.cancel_drill(db, drill_id, body.person_id)
+    if error:
+        drill_obj = drill_service.get_drill(db, drill_id)
+        if not drill_obj:
+            raise HTTPException(status_code=404, detail="Drill not found")
+        raise HTTPException(status_code=400, detail=error)
+    return drill_service.build_drill_detail(db, drill)
+
+
+@app.post("/drills/{drill_id}/complete", response_model=schemas.DrillDetail, tags=["Drills"])
+def complete_drill(drill_id: int, body: schemas.DrillCancel, db: Session = Depends(get_db)):
+    person = crud.get_person(db, body.person_id)
+    if not person:
+        raise HTTPException(status_code=400, detail="Person not found")
+    if not _can_cancel_drill(person):
+        raise HTTPException(status_code=403, detail="Permission denied: only admin can complete drills")
+
+    drill, error = drill_service.complete_drill(db, drill_id, body.person_id)
+    if error:
+        drill_obj = drill_service.get_drill(db, drill_id)
+        if not drill_obj:
+            raise HTTPException(status_code=404, detail="Drill not found")
+        raise HTTPException(status_code=400, detail=error)
+    return drill_service.build_drill_detail(db, drill)
+
+
+@app.post("/drills/{drill_id}/readings/import-json", tags=["Drills"])
+async def import_drill_readings_json(
+    drill_id: int,
+    file: UploadFile = File(...),
+    db: Session = Depends(get_db)
+):
+    drill = drill_service.get_drill(db, drill_id)
+    if not drill:
+        raise HTTPException(status_code=404, detail="Drill not found")
+
+    if drill.status != models.DrillStatus.DRAFT:
+        raise HTTPException(status_code=400, detail="Cannot import readings: drill is not in draft status")
+
+    person = crud.get_person(db, drill.created_by)
+    if not person or not _can_create_drill(person):
+        raise HTTPException(status_code=403, detail="Permission denied: only admin can import drill readings")
+
+    contents = await file.read()
+    try:
+        data = json.loads(contents)
+    except json.JSONDecodeError as e:
+        raise HTTPException(status_code=400, detail=f"Invalid JSON: {str(e)}")
+
+    if not isinstance(data, list):
+        raise HTTPException(status_code=400, detail="JSON must be a list of readings")
+
+    readings = []
+    for item in data:
+        try:
+            reading = schemas.DrillReadingCreate(**item)
+            readings.append(reading)
+        except Exception as e:
+            raise HTTPException(status_code=400, detail=f"Invalid reading item: {str(e)}")
+
+    successful, failed, errors = drill_service.import_drill_readings(db, drill_id, readings)
+    return {"total": len(readings), "successful": successful, "failed": failed, "errors": errors}
+
+
+@app.post("/drills/{drill_id}/readings/import-csv", tags=["Drills"])
+async def import_drill_readings_csv(
+    drill_id: int,
+    file: UploadFile = File(...),
+    db: Session = Depends(get_db)
+):
+    drill = drill_service.get_drill(db, drill_id)
+    if not drill:
+        raise HTTPException(status_code=404, detail="Drill not found")
+
+    if drill.status != models.DrillStatus.DRAFT:
+        raise HTTPException(status_code=400, detail="Cannot import readings: drill is not in draft status")
+
+    person = crud.get_person(db, drill.created_by)
+    if not person or not _can_create_drill(person):
+        raise HTTPException(status_code=403, detail="Permission denied: only admin can import drill readings")
+
+    contents = await file.read()
+    content_str = contents.decode('utf-8')
+
+    reader = csv.DictReader(io.StringIO(content_str))
+    readings = []
+
+    required_fields = {'sensor_code', 'temperature', 'reading_time'}
+    if not required_fields.issubset(set(reader.fieldnames or [])):
+        raise HTTPException(
+            status_code=400,
+            detail=f"CSV must have columns: {', '.join(required_fields)}"
+        )
+
+    for row in reader:
+        try:
+            reading = schemas.DrillReadingCreate(
+                sensor_code=row['sensor_code'],
+                temperature=float(row['temperature']),
+                reading_time=datetime.fromisoformat(row['reading_time'])
+            )
+            readings.append(reading)
+        except Exception as e:
+            raise HTTPException(status_code=400, detail=f"Invalid row {row}: {str(e)}")
+
+    successful, failed, errors = drill_service.import_drill_readings(db, drill_id, readings)
+    return {"total": len(readings), "successful": successful, "failed": failed, "errors": errors}
+
+
+@app.get("/drills/{drill_id}/export.json", tags=["Drills"])
+def export_drill_json(drill_id: int, db: Session = Depends(get_db)):
+    drill = drill_service.get_drill(db, drill_id)
+    if not drill:
+        raise HTTPException(status_code=404, detail="Drill not found")
+
+    export_data = drill_service.build_drill_export(db, drill)
+    json_str = json.dumps(export_data, default=str, ensure_ascii=False, indent=2)
+
+    return StreamingResponse(
+        io.BytesIO(json_str.encode('utf-8')),
+        media_type="application/json",
+        headers={"Content-Disposition": f"attachment; filename=drill_{drill_id}_export.json"}
+    )
